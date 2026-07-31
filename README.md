@@ -7,11 +7,11 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: Phase 1–3 (local).** Full project CRUD, instructions + snapshots,
-> knowledge base folders/files, chat sessions + fork + move + detach, agent
-> binding, RAG config, audit log, cowork bridge, MCP server, and full project
-> export are implemented and green. Upstream-dependent features (RAG indexing,
-> agent resolution) proxy to fusion-mlx / fusion-rag / agent-studio.
+> **Status: Phase 1–3 (local + upstream).** Full project CRUD, instructions +
+> snapshots, knowledge base folders/files, chat sessions + fork + move + detach,
+> agent binding, RAG indexing + search, audit log, cowork bridge, MCP server,
+> and full project export are implemented and green. RAG chain verified E2E:
+> project-svc → fusion-rag → fusion-mlx with BGE-M3 embeddings (score ≥ 0.6).
 
 ## Layout
 
@@ -273,10 +273,38 @@ MCP: `POST /mcp` (JSON-RPC 2.0 with tools/list, tools/call, initialize)
 | `FUSION_PROJECT_PORT` | `11440` | REST port |
 | `FUSION_PROJECT_HOME` | `~/.fusion-projects` | data + storage root |
 | `FUSION_MLX_URL` | `http://127.0.0.1:11434/v1` | fusion-mlx base URL |
+| `FUSION_MLX_API_KEY` | `""` | fusion-mlx Bearer token |
 | `FUSION_RAG_URL` | `http://127.0.0.1:11436` | fusion-rag/kb base URL |
+| `FUSION_RAG_EMBEDDING_MODEL` | `BAAI--bge-m3` | embedding model ID for KB creation |
 | `FUSION_AGENT_STUDIO_URL` | `http://127.0.0.1:8000` | agent-studio URL |
 | `FUSION_GATEWAY_URL` | `http://127.0.0.1:8100` | fusion-gateway URL |
 | `FUSION_COWORK_SOCK` | `/tmp/fusion-cowork.sock` | cowork UDS socket |
+
+## RAG E2E chain
+
+The project service integrates with fusion-rag (port 11436) and fusion-mlx (port
+11434) for knowledge base indexing and retrieval. The verified flow:
+
+```
+project-svc (UDS RPC)
+  → rag_coordinator.index_file() / .query()
+    → upstream_client.rag_upload_doc() / .rag_search()
+      → fusion-rag /kb/bases/{kb_id}/documents (upload + embed)
+        → fusion-mlx /v1/embeddings (BAAI--bge-m3, 1024-dim)
+      → fusion-rag /kb/bases/{kb_id}/search (vector similarity)
+```
+
+**Prerequisites:**
+- fusion-mlx running on port 11434 with BGE-M3 model loaded
+- fusion-rag running on port 11436 with `mlx_api_key` and `embedding_model='BAAI--bge-m3'`
+- project-svc started with `FUSION_MLX_API_KEY=dahai168 FUSION_RAG_EMBEDDING_MODEL=BAAI--bge-m3`
+
+**Verified E2E sequence:**
+1. `project.create` → project with `kb_id: null`
+2. `project.knowledge.folder.create` → folder for docs
+3. `project.knowledge.file.upload` → copies file to project storage, `index_status: PENDING`
+4. `project.rag.index_file` → calls fusion-rag upload → creates KB on first use → stores `kb_id` → returns `doc_id, chunks, chars`
+5. `project.rag.query` → calls fusion-rag search → returns results with `score ≥ 0.6`
 
 ## Storage layout
 

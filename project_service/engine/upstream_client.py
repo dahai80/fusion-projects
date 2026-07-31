@@ -86,7 +86,11 @@ class CircuitBreaker:
 class UpstreamClient:
     def __init__(self, timeout: float = 30.0) -> None:
         self.timeout = timeout
-        self._http = httpx.AsyncClient(timeout=timeout)
+        self._mlx_api_key = config.MLX_API_KEY
+        headers = {}
+        if self._mlx_api_key:
+            headers["Authorization"] = f"Bearer {self._mlx_api_key}"
+        self._http = httpx.AsyncClient(timeout=timeout, headers=headers)
         self._circuits = {
             "mlx": CircuitBreaker("mlx", failure_threshold=5, recovery_timeout=30.0),
             "rag": CircuitBreaker("rag", failure_threshold=5, recovery_timeout=30.0),
@@ -181,35 +185,46 @@ class UpstreamClient:
         except Exception:
             return False
 
-    # ── RAG ──
+    # ── RAG (fusion-rag / fusion-kb) ──
 
-    async def rag_index(self, project_id: str, file_paths: list[str], **kwargs: Any) -> dict:
-        payload = {"project_id": project_id, "file_paths": file_paths, **kwargs}
-        return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/api/v1/index", json_data=payload)
+    async def rag_create_kb(self, name: str, description: str = "", kb_id: str = "", embedding_model: str = "") -> dict:
+        payload: dict[str, Any] = {"name": name, "description": description}
+        if kb_id:
+            payload["kb_id"] = kb_id
+        if embedding_model:
+            payload["embedding_model"] = embedding_model
+        return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/kb/bases", json_data=payload)
 
-    async def rag_query(
-        self,
-        project_id: str,
-        query: str,
-        *,
-        top_k: int = 5,
-        threshold: float = 0.65,
-        folder_ids: Optional[list[str]] = None,
-        **kwargs: Any,
-    ) -> dict:
-        payload: dict[str, Any] = {
-            "project_id": project_id,
-            "query": query,
-            "top_k": top_k,
-            "threshold": threshold,
-            **kwargs,
-        }
-        if folder_ids:
-            payload["folder_ids"] = folder_ids
-        return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/api/v1/query", json_data=payload)
+    async def rag_upload_doc(self, kb_id: str, file_path: str, contextualize: bool = True) -> dict:
+        payload = {"file_path": file_path, "contextualize": contextualize}
+        return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/documents", json_data=payload)
 
-    async def rag_delete_doc(self, doc_id: str) -> dict:
-        return await self._request("rag", "DELETE", f"{config.RAG_BASE_URL}/api/v1/documents/{doc_id}")
+    async def rag_batch_upload(self, kb_id: str, file_paths: list[str], contextualize: bool = True) -> dict:
+        payload = {"file_paths": file_paths, "contextualize": contextualize}
+        return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/documents/batch", json_data=payload)
+
+    async def rag_search(self, kb_id: str, query: str, *, top_k: int = 5) -> dict:
+        payload = {"query": query, "top_k": top_k}
+        return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/search", json_data=payload)
+
+    async def rag_ask(self, kb_id: str, query: str, *, top_k: int = 5) -> dict:
+        payload = {"query": query, "top_k": top_k}
+        return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/ask", json_data=payload)
+
+    async def rag_list_docs(self, kb_id: str) -> dict:
+        return await self._request("rag", "GET", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/documents")
+
+    async def rag_delete_doc(self, kb_id: str, doc_id: str) -> dict:
+        return await self._request("rag", "DELETE", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/documents/{doc_id}")
+
+    async def rag_get_kb(self, kb_id: str) -> dict:
+        return await self._request("rag", "GET", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}")
+
+    async def rag_delete_kb(self, kb_id: str) -> dict:
+        return await self._request("rag", "DELETE", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}")
+
+    async def rag_get_stats(self, kb_id: str) -> dict:
+        return await self._request("rag", "GET", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/stats")
 
     async def rag_is_healthy(self) -> bool:
         cb = self._circuit("rag")

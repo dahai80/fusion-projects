@@ -15,7 +15,9 @@ DB_PATH = DATA_DIR / "projects.db"
 LOG_DIR = BASE_DIR / "logs"
 
 MLX_BASE_URL = os.environ.get("FUSION_MLX_URL", "http://127.0.0.1:11434/v1")
+MLX_API_KEY = os.environ.get("FUSION_MLX_API_KEY", "")
 RAG_BASE_URL = os.environ.get("FUSION_RAG_URL", "http://127.0.0.1:11436")
+RAG_EMBEDDING_MODEL = os.environ.get("FUSION_RAG_EMBEDDING_MODEL", "BAAI--bge-m3")
 AGENT_STUDIO_URL = os.environ.get("FUSION_AGENT_STUDIO_URL", "http://127.0.0.1:8000")
 GATEWAY_URL = os.environ.get("FUSION_GATEWAY_URL", "http://127.0.0.1:8100")
 COWORK_SOCK = os.environ.get("FUSION_COWORK_SOCK", "/tmp/fusion-cowork.sock")
