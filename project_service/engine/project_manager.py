@@ -1,4 +1,6 @@
+import io
 import logging
+import zipfile
 from typing import Optional
 
 import httpx
@@ -16,6 +18,18 @@ from project_service.store.project_store import ProjectStore
 logger = logging.getLogger(__name__)
 
 ARTIFACTS_ENGINE_URL = "http://127.0.0.1:8892"
+
+_TYPE_EXTENSIONS = {
+    "html": ".html",
+    "react": ".jsx",
+    "code": ".py",
+    "markdown": ".md",
+    "data": ".json",
+}
+
+
+def _type_extension(artifact_type: str) -> str:
+    return _TYPE_EXTENSIONS.get(artifact_type, ".txt")
 
 
 class ProjectError(Exception):
@@ -105,9 +119,18 @@ class ProjectManager:
             raise ProjectNotArchived(
                 "project must be archived before delete: " + project_id
             )
+        artifact_rows = self.store.list_artifact_refs(project_id)
+        for ar in artifact_rows:
+            try:
+                await self._call_artifacts_engine(
+                    "artifact.update",
+                    {"artifact_id": ar["artifact_id"], "in_project_kb": False},
+                )
+            except Exception:
+                logger.warning("failed to clear in_project_kb for artifact=%s", ar["artifact_id"])
         self.store.delete_project(project_id)
         self.file_store.remove_project(project_id)
-        logger.info("project deleted id=%s", project_id)
+        logger.info("project deleted id=%s artifacts_cleared=%d", project_id, len(artifact_rows))
 
     async def _call_artifacts_engine(self, method: str, params: dict) -> dict:
         payload = {
@@ -155,10 +178,53 @@ class ProjectManager:
         logger.info("artifact migrated artifact=%s project=%s", artifact_id, project_id)
         return ArtifactRef.from_row(row)
 
-    async def list_artifacts(self, project_id: str) -> list[ArtifactRef]:
+    async def list_artifacts(
+        self,
+        project_id: str,
+        artifact_type: Optional[str] = None,
+        artifact_kind: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> list[ArtifactRef]:
         await self.get(project_id)
-        rows = self.store.list_artifact_refs(project_id)
+        rows = self.store.list_artifact_refs(
+            project_id,
+            artifact_type=artifact_type,
+            artifact_kind=artifact_kind,
+            search=search,
+        )
         return [ArtifactRef.from_row(r) for r in rows]
+
+    async def export_artifacts(
+        self,
+        project_id: str,
+        artifact_ids: Optional[list[str]] = None,
+    ) -> bytes:
+        await self.get(project_id)
+        if artifact_ids:
+            refs = []
+            for aid in artifact_ids:
+                ref = self.store.get_artifact_ref(aid)
+                if ref and ref["project_id"] == project_id:
+                    refs.append(ref)
+        else:
+            refs = self.store.list_artifact_refs(project_id)
+        if not refs:
+            raise ArtifactNotFound("no artifacts to export")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for ref in refs:
+                try:
+                    result = await self._call_artifacts_engine(
+                        "artifact.get", {"artifact_id": ref["artifact_id"]}
+                    )
+                    content = result.get("artifact", {}).get("content", "")
+                    filename = f"{ref['artifact_name'] or ref['artifact_id']}"
+                    ext = _type_extension(ref.get("artifact_type", ""))
+                    zf.writestr(f"{filename}{ext}", content)
+                except Exception:
+                    logger.warning("export failed for artifact=%s, skipping", ref["artifact_id"])
+        logger.info("exported artifacts project=%s count=%d", project_id, len(refs))
+        return buf.getvalue()
 
     async def remove_artifact(self, artifact_id: str) -> bool:
         existing = self.store.get_artifact_ref(artifact_id)

@@ -39,6 +39,7 @@ class Project(BaseModel):
     rag_top_k: int
     rag_threshold: float
     kb_id: Optional[str] = None
+    artifact_count: int = 0
     created_at: str
     updated_at: str
 
@@ -56,6 +57,7 @@ class Project(BaseModel):
             rag_top_k=row["rag_top_k"],
             rag_threshold=row["rag_threshold"],
             kb_id=row["kb_id"],
+            artifact_count=row.get("artifact_count", 0),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -68,6 +70,7 @@ class ProjectListItem(BaseModel):
     is_archived: bool
     is_starred: bool
     default_agent_id: Optional[str] = None
+    artifact_count: int = 0
     updated_at: str
 
     @classmethod
@@ -79,5 +82,6 @@ class ProjectListItem(BaseModel):
             is_archived=bool(row["is_archived"]),
             is_starred=bool(row["is_starred"]),
             default_agent_id=row["default_agent_id"],
+            artifact_count=row.get("artifact_count", 0),
             updated_at=row["updated_at"],
         )
