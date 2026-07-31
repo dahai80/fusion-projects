@@ -1,0 +1,33 @@
+import logging
+import os
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+SOCKET_PATH = os.environ.get("FUSION_PROJECT_SOCK", "/tmp/fusion-project-svc.sock")
+REST_HOST = os.environ.get("FUSION_PROJECT_HOST", "127.0.0.1")
+REST_PORT = int(os.environ.get("FUSION_PROJECT_PORT", "11440"))
+
+BASE_DIR = Path(os.environ.get("FUSION_PROJECT_HOME", str(Path.home() / ".fusion-projects")))
+DATA_DIR = BASE_DIR / "data"
+STORAGE_DIR = BASE_DIR / "storage"
+DB_PATH = DATA_DIR / "projects.db"
+LOG_DIR = BASE_DIR / "logs"
+
+MLX_BASE_URL = os.environ.get("FUSION_MLX_URL", "http://127.0.0.1:11434/v1")
+RAG_BASE_URL = os.environ.get("FUSION_RAG_URL", "http://127.0.0.1:11436")
+AGENT_STUDIO_URL = os.environ.get("FUSION_AGENT_STUDIO_URL", "http://127.0.0.1:8000")
+GATEWAY_URL = os.environ.get("FUSION_GATEWAY_URL", "http://127.0.0.1:8100")
+COWORK_SOCK = os.environ.get("FUSION_COWORK_SOCK", "/tmp/fusion-cowork.sock")
+
+DEFAULT_RAG_MODE = "AUTO"
+DEFAULT_RAG_TOP_K = 5
+DEFAULT_RAG_THRESHOLD = 0.65
+DEFAULT_PROMPT_MERGE = "AGENT_FIRST"
+MAX_INSTRUCTION_CHARS = 10000
+
+
+def ensure_dirs() -> None:
+    for d in (DATA_DIR, STORAGE_DIR, LOG_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+    logger.info("fusion-project-svc dirs ready under %s", BASE_DIR)
