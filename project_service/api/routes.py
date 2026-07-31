@@ -1,12 +1,15 @@
+import asyncio
+import json
 import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from project_service.engine.agent_binder import AgentBinder, AgentBinderError
 from project_service.engine.chat_manager import ChatManager, ChatNotFound
-from project_service.engine.instruction_engine import InstructionEngine
+from project_service.engine.cowork_bridge import CoworkBridge, CoworkTaskNotFound
+from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
     KnowledgeFileNotFound,
@@ -28,16 +31,20 @@ from project_service.models.agent_binding import (
     PromptMergeMode,
 )
 from project_service.models.artifact_ref import ArtifactMigrateRequest, ArtifactRef
+from project_service.models.audit import AuditLogEntry
 from project_service.models.chat import (
     Chat,
     ChatCreate,
     ChatForkRequest,
     ChatListItem,
+    ChatMoveRequest,
     ChatSnapshot,
     ChatUpdate,
     Message,
     MessageCreate,
+    TempAttachment,
 )
+from project_service.models.cowork import CoworkTrigger
 from project_service.models.instruction import (
     InstructionContent,
     InstructionSave,
@@ -50,6 +57,7 @@ from project_service.models.knowledge import (
     KnowledgeFile,
     KnowledgeFolder,
 )
+from project_service.mcp_server import MCPServer
 from project_service.models.project import (
     Project,
     ProjectCreate,
@@ -180,6 +188,18 @@ async def delete_project(
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@router.post("/projects/{project_id}/duplicate", response_model=Project, status_code=201)
+async def duplicate_project(
+    project_id: str,
+    name: Optional[str] = None,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        return await pm.duplicate_project(project_id, name=name)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+
+
 # ── Instruction endpoints ──
 
 
@@ -229,6 +249,36 @@ async def list_instruction_snapshots(
         return await ie.list_snapshots(project_id)
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="project not found")
+
+
+@router.post(
+    "/projects/{project_id}/instructions/snapshots/{snapshot_id}/restore",
+    response_model=InstructionContent,
+)
+async def restore_instruction_snapshot(
+    project_id: str,
+    snapshot_id: str,
+    ie: InstructionEngine = Depends(get_instruction_engine),
+):
+    try:
+        return await ie.restore_snapshot(snapshot_id)
+    except SnapshotNotFound:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+
+
+@router.delete(
+    "/projects/{project_id}/instructions/snapshots/{snapshot_id}",
+    status_code=204,
+)
+async def delete_instruction_snapshot(
+    project_id: str,
+    snapshot_id: str,
+    ie: InstructionEngine = Depends(get_instruction_engine),
+):
+    try:
+        await ie.delete_snapshot(snapshot_id)
+    except SnapshotNotFound:
+        raise HTTPException(status_code=404, detail="snapshot not found")
 
 
 # ── Artifact endpoints ──
@@ -296,6 +346,22 @@ async def export_project_artifacts(
         raise HTTPException(status_code=404, detail="project not found")
     except ArtifactNotFound:
         raise HTTPException(status_code=404, detail="no artifacts to export")
+
+
+@router.post("/projects/{project_id}/export")
+async def export_project(
+    project_id: str,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        data = await pm.export_project(project_id)
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename=project_{project_id}_full.zip"},
+        )
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
 
 
 # ── Chat endpoints ──
@@ -386,6 +452,33 @@ async def fork_chat(
     try:
         label = payload.label if payload else None
         return await cm.fork_chat(chat_id, label=label)
+    except ChatNotFound:
+        raise HTTPException(status_code=404, detail="chat not found")
+
+
+@router.post("/projects/{project_id}/chats/{chat_id}/move", response_model=Chat)
+async def move_chat(
+    project_id: str,
+    chat_id: str,
+    payload: ChatMoveRequest,
+    cm: ChatManager = Depends(get_chat_manager),
+):
+    try:
+        return await cm.move_chat(chat_id, payload.target_project_id)
+    except ChatNotFound:
+        raise HTTPException(status_code=404, detail="chat not found")
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="target project not found")
+
+
+@router.post("/projects/{project_id}/chats/{chat_id}/detach", response_model=Chat)
+async def detach_chat(
+    project_id: str,
+    chat_id: str,
+    cm: ChatManager = Depends(get_chat_manager),
+):
+    try:
+        return await cm.detach_chat(chat_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -486,6 +579,82 @@ async def delete_message(
         raise HTTPException(status_code=404, detail="message not found")
 
 
+@router.post("/projects/{project_id}/chats/{chat_id}/messages/stream")
+async def stream_message(
+    project_id: str,
+    chat_id: str,
+    payload: MessageCreate,
+    cm: ChatManager = Depends(get_chat_manager),
+):
+    try:
+        msg = await cm.add_message(chat_id, payload)
+
+        async def event_stream():
+            yield f"data: {json.dumps({'type': 'message', 'message': msg.model_dump()})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+    except ChatNotFound:
+        raise HTTPException(status_code=404, detail="chat not found")
+
+
+# ── Temp attachment endpoints ──
+
+
+@router.post(
+    "/projects/{project_id}/chats/{chat_id}/temp-attachments",
+    response_model=TempAttachment,
+    status_code=201,
+)
+async def add_temp_attachment(
+    project_id: str,
+    chat_id: str,
+    file_path: str,
+    original_name: str,
+    file_size: int = 0,
+    mime_type: Optional[str] = None,
+    cm: ChatManager = Depends(get_chat_manager),
+):
+    try:
+        return await cm.add_temp_attachment(
+            chat_id, file_path, original_name,
+            file_size=file_size, mime_type=mime_type,
+        )
+    except ChatNotFound:
+        raise HTTPException(status_code=404, detail="chat not found")
+
+
+@router.get(
+    "/projects/{project_id}/chats/{chat_id}/temp-attachments",
+    response_model=list[TempAttachment],
+)
+async def list_temp_attachments(
+    project_id: str,
+    chat_id: str,
+    cm: ChatManager = Depends(get_chat_manager),
+):
+    try:
+        return await cm.list_temp_attachments(chat_id)
+    except ChatNotFound:
+        raise HTTPException(status_code=404, detail="chat not found")
+
+
+@router.delete(
+    "/projects/{project_id}/chats/{chat_id}/temp-attachments/{attachment_id}",
+    status_code=204,
+)
+async def delete_temp_attachment(
+    project_id: str,
+    chat_id: str,
+    attachment_id: str,
+    cm: ChatManager = Depends(get_chat_manager),
+):
+    try:
+        await cm.delete_temp_attachment(attachment_id)
+    except ChatNotFound:
+        raise HTTPException(status_code=404, detail="temp attachment not found")
+
+
 # ── Knowledge folder endpoints ──
 
 
@@ -573,6 +742,55 @@ async def delete_knowledge_file(
 ):
     try:
         await km.delete_file(file_id)
+    except KnowledgeFileNotFound:
+        raise HTTPException(status_code=404, detail="file not found")
+
+
+@router.post("/projects/{project_id}/knowledge/files/upload", response_model=KnowledgeFile, status_code=201)
+async def upload_knowledge_file(
+    project_id: str,
+    source_path: str,
+    original_name: str,
+    folder_id: Optional[str] = None,
+    mime_type: Optional[str] = None,
+    km: KnowledgeManager = Depends(get_knowledge_manager),
+):
+    try:
+        return await km.upload_file(
+            project_id, source_path, original_name,
+            folder_id=folder_id, mime_type=mime_type,
+        )
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+
+
+@router.post("/projects/{project_id}/knowledge/files/{file_id}/replace", response_model=KnowledgeFile)
+async def replace_knowledge_file(
+    project_id: str,
+    file_id: str,
+    source_path: str,
+    km: KnowledgeManager = Depends(get_knowledge_manager),
+):
+    try:
+        return await km.replace_file(file_id, source_path)
+    except KnowledgeFileNotFound:
+        raise HTTPException(status_code=404, detail="file not found")
+
+
+@router.patch("/projects/{project_id}/knowledge/files/{file_id}", response_model=KnowledgeFile)
+async def update_knowledge_file(
+    project_id: str,
+    file_id: str,
+    name: Optional[str] = None,
+    folder_id: Optional[str] = None,
+    km: KnowledgeManager = Depends(get_knowledge_manager),
+):
+    try:
+        if name is not None:
+            return await km.rename_file(file_id, name)
+        if folder_id is not None:
+            return await km.move_file(file_id, folder_id)
+        raise HTTPException(status_code=400, detail="name or folder_id required")
     except KnowledgeFileNotFound:
         raise HTTPException(status_code=404, detail="file not found")
 
@@ -730,6 +948,49 @@ async def rag_status(
         raise HTTPException(status_code=404, detail="project not found")
 
 
+@router.get("/projects/{project_id}/rag/config")
+async def get_rag_config(
+    project_id: str,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        proj = await pm.get(project_id)
+        return {
+            "rag_mode": proj.rag_mode,
+            "rag_top_k": proj.rag_top_k,
+            "rag_threshold": proj.rag_threshold,
+        }
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+
+
+@router.put("/projects/{project_id}/rag/config")
+async def set_rag_config(
+    project_id: str,
+    rag_mode: Optional[str] = None,
+    rag_top_k: Optional[int] = None,
+    rag_threshold: Optional[float] = None,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        fields = {}
+        if rag_mode is not None:
+            fields["rag_mode"] = rag_mode
+        if rag_top_k is not None:
+            fields["rag_top_k"] = rag_top_k
+        if rag_threshold is not None:
+            fields["rag_threshold"] = rag_threshold
+        payload = ProjectUpdate(**fields)
+        proj = await pm.update(project_id, payload)
+        return {
+            "rag_mode": proj.rag_mode,
+            "rag_top_k": proj.rag_top_k,
+            "rag_threshold": proj.rag_threshold,
+        }
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+
+
 # ── Upstream health ──
 
 
@@ -745,3 +1006,91 @@ async def upstream_circuits(
     uc: UpstreamClient = Depends(get_upstream_client),
 ):
     return uc.get_circuit_status()
+
+
+# ── Audit log endpoints ──
+
+
+@router.get("/projects/{project_id}/audit", response_model=list[AuditLogEntry])
+async def list_audit_log(
+    project_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        await pm.get(project_id)
+        rows = pm.store.list_audit_log(project_id, limit=limit, offset=offset)
+        return [AuditLogEntry.from_row(r) for r in rows]
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+
+
+@router.post("/projects/{project_id}/audit", response_model=AuditLogEntry, status_code=201)
+async def create_audit_log(
+    project_id: str,
+    action: str,
+    chat_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    details: Optional[str] = None,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        await pm.get(project_id)
+        row = pm.store.create_audit_log({
+            "project_id": project_id,
+            "chat_id": chat_id,
+            "action": action,
+            "agent_id": agent_id,
+            "details": details,
+        })
+        return AuditLogEntry.from_row(row)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+
+
+# ── MCP endpoint ──
+
+
+def get_mcp_server(request: Request) -> MCPServer:
+    return request.app.state.mcp_server
+
+
+@router.post("/mcp")
+async def mcp_endpoint(
+    request: Request,
+    mcp: MCPServer = Depends(get_mcp_server),
+):
+    body = await request.body()
+    resp = await mcp.handle_request(body)
+    if not resp:
+        return Response(status_code=204)
+    return Response(content=resp, media_type="application/json")
+
+
+# ── Cowork endpoints ──
+
+
+def get_cowork_bridge(request: Request) -> CoworkBridge:
+    return request.app.state.cowork_bridge
+
+
+@router.post("/cowork/trigger")
+async def cowork_trigger(
+    payload: CoworkTrigger,
+    cb: CoworkBridge = Depends(get_cowork_bridge),
+):
+    task = await cb.trigger_task(payload)
+    return task.model_dump()
+
+
+@router.get("/cowork/{task_id}/status")
+async def cowork_status(
+    task_id: str,
+    cb: CoworkBridge = Depends(get_cowork_bridge),
+):
+    try:
+        task = await cb.get_status(task_id)
+        return task.model_dump()
+    except CoworkTaskNotFound:
+        raise HTTPException(status_code=404, detail="cowork task not found")

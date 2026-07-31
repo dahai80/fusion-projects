@@ -12,6 +12,10 @@ from project_service.store.project_store import ProjectStore
 logger = logging.getLogger(__name__)
 
 
+class SnapshotNotFound(Exception):
+    pass
+
+
 class InstructionEngine:
     def __init__(
         self,
@@ -45,3 +49,23 @@ class InstructionEngine:
         await self.project_manager.get(project_id)
         rows = self.store.list_snapshots(project_id)
         return [InstructionSnapshot.from_row(r) for r in rows]
+
+    async def restore_snapshot(self, snapshot_id: str) -> InstructionContent:
+        snap = self.store.get_snapshot(snapshot_id)
+        if not snap:
+            raise SnapshotNotFound(snapshot_id)
+        await self.project_manager.get(snap["project_id"])
+        existing = self.store.get_instructions(snap["project_id"])
+        if existing and existing["content"] and existing["content"] != snap["content"]:
+            self.store.snapshot_instruction(snap["project_id"], existing["content"], label="pre-restore")
+        row = self.store.save_instructions(snap["project_id"], snap["content"])
+        logger.info("restored instruction snapshot=%s project=%s", snapshot_id, snap["project_id"])
+        return InstructionContent.from_row(row)
+
+    async def delete_snapshot(self, snapshot_id: str) -> bool:
+        snap = self.store.get_snapshot(snapshot_id)
+        if not snap:
+            raise SnapshotNotFound(snapshot_id)
+        deleted = self.store.delete_snapshot(snapshot_id)
+        logger.info("deleted instruction snapshot=%s deleted=%s", snapshot_id, deleted)
+        return deleted

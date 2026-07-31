@@ -6,8 +6,10 @@ from fastapi import FastAPI
 
 from project_service import config
 from project_service.api.routes import router
+from project_service.engine.cowork_bridge import CoworkBridge
 from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.project_manager import ProjectManager
+from project_service.mcp_server import MCPServer
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,9 @@ def create_app(
     app.state.instruction_engine = instruction_engine or InstructionEngine(
         project_manager=app.state.project_manager
     )
+    app.state.mcp_server = MCPServer()
+    pm_store = getattr(app.state.project_manager, "store", None)
+    app.state.cowork_bridge = CoworkBridge(store=pm_store) if pm_store else CoworkBridge()
     app.include_router(router)
 
     @app.get("/health")

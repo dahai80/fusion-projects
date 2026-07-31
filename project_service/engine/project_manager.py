@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import zipfile
 from typing import Optional
@@ -63,10 +64,16 @@ class ProjectManager:
 
     async def create(self, payload: ProjectCreate) -> Project:
         data = payload.model_dump()
+        instructions_text = data.pop("instructions", None)
+        data.pop("template_id", None)
         row = self.store.create_project(data)
         self.file_store.init_project(row["id"])
-        logger.info("project created id=%s name=%s", row["id"], row["name"])
-        return Project.from_row(row)
+        if instructions_text:
+            self.store.save_instructions(row["id"], instructions_text)
+            logger.info("project created with instructions id=%s len=%d", row["id"], len(instructions_text))
+        else:
+            logger.info("project created id=%s name=%s", row["id"], row["name"])
+        return Project.from_row(self.store.get_project(row["id"]))
 
     async def get(self, project_id: str) -> Project:
         row = self.store.get_project(project_id)
@@ -226,6 +233,35 @@ class ProjectManager:
         logger.info("exported artifacts project=%s count=%d", project_id, len(refs))
         return buf.getvalue()
 
+    async def export_project(self, project_id: str) -> bytes:
+        proj = await self.get(project_id)
+        await self.get(project_id)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("project.json", json.dumps(proj.model_dump(), ensure_ascii=False, indent=2))
+            instr = self.store.get_instructions(project_id)
+            if instr:
+                zf.writestr("instructions.json", json.dumps(instr, ensure_ascii=False, indent=2))
+            chats = self.store.list_chats(project_id)
+            if chats:
+                zf.writestr("chats.json", json.dumps(chats, ensure_ascii=False, indent=2))
+                for c in chats:
+                    cid = c["id"]
+                    msgs = self.store.list_messages(cid)
+                    if msgs:
+                        zf.writestr(f"chats/{cid}/messages.json", json.dumps(msgs, ensure_ascii=False, indent=2))
+            folders = self.store.list_folders(project_id)
+            if folders:
+                zf.writestr("knowledge_folders.json", json.dumps(folders, ensure_ascii=False, indent=2))
+            files = self.store.list_knowledge_files(project_id)
+            if files:
+                zf.writestr("knowledge_files.json", json.dumps(files, ensure_ascii=False, indent=2))
+            binding = self.store.get_binding_by_project(project_id)
+            if binding:
+                zf.writestr("agent_binding.json", json.dumps(binding, ensure_ascii=False, indent=2))
+        logger.info("exported full project=%s", project_id)
+        return buf.getvalue()
+
     async def remove_artifact(self, artifact_id: str) -> bool:
         existing = self.store.get_artifact_ref(artifact_id)
         if not existing:
@@ -234,3 +270,29 @@ class ProjectManager:
         if removed:
             logger.info("artifact ref removed artifact=%s", artifact_id)
         return removed
+
+    async def duplicate_project(self, project_id: str, name: Optional[str] = None) -> Project:
+        source = await self.get(project_id)
+        new_name = name or f"{source.name} (copy)"
+        payload = ProjectCreate(
+            name=new_name,
+            description=source.description,
+            default_agent_id=source.default_agent_id,
+            prompt_merge_mode=source.prompt_merge_mode,
+            rag_mode=source.rag_mode,
+            rag_top_k=source.rag_top_k,
+            rag_threshold=source.rag_threshold,
+        )
+        new_proj = await self.create(payload)
+        instr = self.store.get_instructions(project_id)
+        if instr and instr["content"]:
+            self.store.save_instructions(new_proj.id, instr["content"])
+        bindings = self.store.get_binding_by_project(project_id)
+        if bindings:
+            self.store.create_binding({
+                "project_id": new_proj.id,
+                "agent_id": bindings["agent_id"],
+                "merge_mode": bindings["merge_mode"],
+            })
+        logger.info("project duplicated from=%s to=%s", project_id, new_proj.id)
+        return new_proj
