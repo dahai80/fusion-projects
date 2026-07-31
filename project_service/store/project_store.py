@@ -46,10 +46,128 @@ CREATE TABLE IF NOT EXISTS instruction_snapshots (
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS project_artifacts (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL UNIQUE,
+    artifact_name TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    artifact_kind TEXT,
+    content_summary TEXT,
+    migrated_at TEXT NOT NULL,
+    source_session_id TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chats (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    title TEXT,
+    is_starred INTEGER NOT NULL DEFAULT 0,
+    agent_id TEXT,
+    fork_from_chat_id TEXT,
+    fork_from_snapshot_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chat_snapshots (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    title TEXT,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    agent_id TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    rag_sources TEXT,
+    tool_calls TEXT,
+    token_usage TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_folders (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    parent_id TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_id) REFERENCES knowledge_folders(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_files (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    folder_id TEXT,
+    name TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    mime_type TEXT,
+    rag_doc_id TEXT,
+    index_status TEXT NOT NULL DEFAULT 'PENDING',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (folder_id) REFERENCES knowledge_folders(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_agent_bindings (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    chat_id TEXT,
+    agent_id TEXT,
+    merge_mode TEXT NOT NULL DEFAULT 'AGENT_FIRST',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS rag_queries (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    chat_id TEXT,
+    query TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'AUTO',
+    scope_folder_ids TEXT,
+    top_k INTEGER NOT NULL DEFAULT 5,
+    threshold REAL NOT NULL DEFAULT 0.65,
+    results TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE SET NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_instructions_project ON instructions(project_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_project ON instruction_snapshots(project_id);
 CREATE INDEX IF NOT EXISTS idx_projects_archived ON projects(is_archived);
 CREATE INDEX IF NOT EXISTS idx_projects_starred ON projects(is_starred);
+CREATE INDEX IF NOT EXISTS idx_pa_project ON project_artifacts(project_id);
+CREATE INDEX IF NOT EXISTS idx_pa_artifact ON project_artifacts(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id);
+CREATE INDEX IF NOT EXISTS idx_chats_starred ON chats(is_starred);
+CREATE INDEX IF NOT EXISTS idx_chat_snapshots_chat ON chat_snapshots(chat_id);
+CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(chat_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_kf_project ON knowledge_folders(project_id);
+CREATE INDEX IF NOT EXISTS idx_kf_parent ON knowledge_folders(parent_id);
+CREATE INDEX IF NOT EXISTS idx_kfile_project ON knowledge_files(project_id);
+CREATE INDEX IF NOT EXISTS idx_kfile_folder ON knowledge_files(folder_id);
+CREATE INDEX IF NOT EXISTS idx_kfile_status ON knowledge_files(index_status);
+CREATE INDEX IF NOT EXISTS idx_binding_project ON chat_agent_bindings(project_id);
+CREATE INDEX IF NOT EXISTS idx_binding_chat ON chat_agent_bindings(chat_id);
+CREATE INDEX IF NOT EXISTS idx_rag_project ON rag_queries(project_id);
 """
 
 ALLOWED_UPDATE_FIELDS = {
@@ -275,3 +393,453 @@ class ProjectStore:
                 (project_id,),
             )
             return [dict(r) for r in cur.fetchall()]
+
+    def create_artifact_ref(self, data: dict) -> dict:
+        aid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": aid,
+            "project_id": data["project_id"],
+            "artifact_id": data["artifact_id"],
+            "artifact_name": data["artifact_name"],
+            "artifact_type": data["artifact_type"],
+            "artifact_kind": data.get("artifact_kind"),
+            "content_summary": data.get("content_summary"),
+            "migrated_at": now,
+            "source_session_id": data.get("source_session_id"),
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO project_artifacts ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created artifact_ref id=%s artifact=%s project=%s", aid, data["artifact_id"], data["project_id"])
+        return self.get_artifact_ref_by_id(aid)
+
+    def get_artifact_ref_by_id(self, ref_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM project_artifacts WHERE id=?", (ref_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def get_artifact_ref(self, artifact_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM project_artifacts WHERE artifact_id=?", (artifact_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def list_artifact_refs(self, project_id: str) -> list[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM project_artifacts WHERE project_id=? ORDER BY migrated_at DESC",
+                (project_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def remove_artifact_ref(self, artifact_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM project_artifacts WHERE artifact_id=?", (artifact_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("removed artifact_ref artifact=%s", artifact_id)
+        return deleted > 0
+
+    def count_artifact_refs(self, project_id: str) -> int:
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM project_artifacts WHERE project_id=?", (project_id,))
+            return cur.fetchone()[0]
+
+    # ── Chat CRUD ──
+
+    def create_chat(self, data: dict) -> dict:
+        cid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": cid,
+            "project_id": data["project_id"],
+            "title": data.get("title"),
+            "is_starred": 0,
+            "agent_id": data.get("agent_id"),
+            "fork_from_chat_id": data.get("fork_from_chat_id"),
+            "fork_from_snapshot_id": data.get("fork_from_snapshot_id"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO chats ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created chat id=%s project=%s", cid, data["project_id"])
+        return self.get_chat(cid)
+
+    def get_chat(self, chat_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM chats WHERE id=?", (chat_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def list_chats(self, project_id: str, only_starred: bool = False) -> list[dict]:
+        clauses = ["project_id=?"]
+        params: list[Any] = [project_id]
+        if only_starred:
+            clauses.append("is_starred=1")
+        where = " WHERE " + " AND ".join(clauses)
+        sql = f"SELECT * FROM chats{where} ORDER BY is_starred DESC, updated_at DESC"
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+    def update_chat(self, chat_id: str, fields: dict) -> Optional[dict]:
+        allowed = {"title", "is_starred", "agent_id"}
+        clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not clean:
+            return self.get_chat(chat_id)
+        clean["updated_at"] = _now()
+        sets = ",".join(f"{k}=?" for k in clean)
+        vals = list(clean.values()) + [chat_id]
+        with self._cursor() as cur:
+            cur.execute(f"UPDATE chats SET {sets} WHERE id=?", vals)
+            if cur.rowcount == 0:
+                logger.warning("update_chat no row chat=%s", chat_id)
+                return None
+        logger.info("updated chat id=%s fields=%s", chat_id, list(clean.keys()))
+        return self.get_chat(chat_id)
+
+    def delete_chat(self, chat_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM chats WHERE id=?", (chat_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("deleted chat id=%s", chat_id)
+        return deleted > 0
+
+    # ── Chat Snapshot ──
+
+    def create_chat_snapshot(self, data: dict) -> dict:
+        sid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": sid,
+            "chat_id": data["chat_id"],
+            "title": data.get("title"),
+            "message_count": data.get("message_count", 0),
+            "agent_id": data.get("agent_id"),
+            "created_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO chat_snapshots ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created chat_snapshot id=%s chat=%s", sid, data["chat_id"])
+        return row
+
+    def list_chat_snapshots(self, chat_id: str) -> list[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM chat_snapshots WHERE chat_id=? ORDER BY created_at DESC",
+                (chat_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_chat_snapshot(self, snapshot_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM chat_snapshots WHERE id=?", (snapshot_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def delete_chat_snapshot(self, snapshot_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM chat_snapshots WHERE id=?", (snapshot_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("deleted chat_snapshot id=%s", snapshot_id)
+        return deleted > 0
+
+    # ── Message CRUD ──
+
+    def create_message(self, data: dict) -> dict:
+        mid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": mid,
+            "chat_id": data["chat_id"],
+            "role": data["role"],
+            "content": data["content"],
+            "rag_sources": data.get("rag_sources"),
+            "tool_calls": data.get("tool_calls"),
+            "token_usage": data.get("token_usage"),
+            "created_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO messages ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created message id=%s chat=%s role=%s", mid, data["chat_id"], data["role"])
+        return self.get_message(mid)
+
+    def get_message(self, message_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM messages WHERE id=?", (message_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def list_messages(self, chat_id: str, limit: int = 100, offset: int = 0) -> list[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+                (chat_id, limit, offset),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def count_messages(self, chat_id: str) -> int:
+        with self._cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM messages WHERE chat_id=?", (chat_id,))
+            return cur.fetchone()[0]
+
+    def delete_message(self, message_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM messages WHERE id=?", (message_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("deleted message id=%s", message_id)
+        return deleted > 0
+
+    # ── Knowledge Folder CRUD ──
+
+    def create_folder(self, data: dict) -> dict:
+        fid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": fid,
+            "project_id": data["project_id"],
+            "name": data["name"],
+            "parent_id": data.get("parent_id"),
+            "sort_order": data.get("sort_order", 0),
+            "created_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO knowledge_folders ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created folder id=%s project=%s name=%s", fid, data["project_id"], data["name"])
+        return self.get_folder(fid)
+
+    def get_folder(self, folder_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM knowledge_folders WHERE id=?", (folder_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def list_folders(self, project_id: str, parent_id: Optional[str] = None) -> list[dict]:
+        if parent_id is not None:
+            sql = "SELECT * FROM knowledge_folders WHERE project_id=? AND parent_id=? ORDER BY sort_order, name"
+            params: list[Any] = [project_id, parent_id]
+        else:
+            sql = "SELECT * FROM knowledge_folders WHERE project_id=? ORDER BY sort_order, name"
+            params = [project_id]
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+    def update_folder(self, folder_id: str, fields: dict) -> Optional[dict]:
+        allowed = {"name", "parent_id", "sort_order"}
+        clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not clean:
+            return self.get_folder(folder_id)
+        sets = ",".join(f"{k}=?" for k in clean)
+        vals = list(clean.values()) + [folder_id]
+        with self._cursor() as cur:
+            cur.execute(f"UPDATE knowledge_folders SET {sets} WHERE id=?", vals)
+            if cur.rowcount == 0:
+                logger.warning("update_folder no row folder=%s", folder_id)
+                return None
+        logger.info("updated folder id=%s fields=%s", folder_id, list(clean.keys()))
+        return self.get_folder(folder_id)
+
+    def delete_folder(self, folder_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM knowledge_folders WHERE id=?", (folder_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("deleted folder id=%s", folder_id)
+        return deleted > 0
+
+    # ── Knowledge File CRUD ──
+
+    def create_knowledge_file(self, data: dict) -> dict:
+        fid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": fid,
+            "project_id": data["project_id"],
+            "folder_id": data.get("folder_id"),
+            "name": data["name"],
+            "original_name": data["original_name"],
+            "file_path": data["file_path"],
+            "file_size": data.get("file_size", 0),
+            "mime_type": data.get("mime_type"),
+            "rag_doc_id": data.get("rag_doc_id"),
+            "index_status": data.get("index_status", "PENDING"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO knowledge_files ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created knowledge_file id=%s project=%s name=%s", fid, data["project_id"], data["name"])
+        return self.get_knowledge_file(fid)
+
+    def get_knowledge_file(self, file_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM knowledge_files WHERE id=?", (file_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def list_knowledge_files(self, project_id: str, folder_id: Optional[str] = None) -> list[dict]:
+        if folder_id is not None:
+            sql = "SELECT * FROM knowledge_files WHERE project_id=? AND folder_id=? ORDER BY name"
+            params: list[Any] = [project_id, folder_id]
+        else:
+            sql = "SELECT * FROM knowledge_files WHERE project_id=? ORDER BY name"
+            params = [project_id]
+        with self._cursor() as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+    def update_knowledge_file(self, file_id: str, fields: dict) -> Optional[dict]:
+        allowed = {"folder_id", "name", "index_status", "rag_doc_id"}
+        clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not clean:
+            return self.get_knowledge_file(file_id)
+        clean["updated_at"] = _now()
+        sets = ",".join(f"{k}=?" for k in clean)
+        vals = list(clean.values()) + [file_id]
+        with self._cursor() as cur:
+            cur.execute(f"UPDATE knowledge_files SET {sets} WHERE id=?", vals)
+            if cur.rowcount == 0:
+                logger.warning("update_knowledge_file no row file=%s", file_id)
+                return None
+        logger.info("updated knowledge_file id=%s fields=%s", file_id, list(clean.keys()))
+        return self.get_knowledge_file(file_id)
+
+    def delete_knowledge_file(self, file_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM knowledge_files WHERE id=?", (file_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("deleted knowledge_file id=%s", file_id)
+        return deleted > 0
+
+    # ── Chat Agent Binding CRUD ──
+
+    def create_binding(self, data: dict) -> dict:
+        bid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": bid,
+            "project_id": data["project_id"],
+            "chat_id": data.get("chat_id"),
+            "agent_id": data.get("agent_id"),
+            "merge_mode": data.get("merge_mode", "AGENT_FIRST"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO chat_agent_bindings ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created binding id=%s project=%s agent=%s", bid, data["project_id"], data.get("agent_id"))
+        return self.get_binding(bid)
+
+    def get_binding(self, binding_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM chat_agent_bindings WHERE id=?", (binding_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def get_binding_by_chat(self, chat_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM chat_agent_bindings WHERE chat_id=?", (chat_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def get_binding_by_project(self, project_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM chat_agent_bindings WHERE project_id=? AND chat_id IS NULL",
+                (project_id,),
+            )
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def update_binding(self, binding_id: str, fields: dict) -> Optional[dict]:
+        allowed = {"agent_id", "merge_mode"}
+        clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not clean:
+            return self.get_binding(binding_id)
+        clean["updated_at"] = _now()
+        sets = ",".join(f"{k}=?" for k in clean)
+        vals = list(clean.values()) + [binding_id]
+        with self._cursor() as cur:
+            cur.execute(f"UPDATE chat_agent_bindings SET {sets} WHERE id=?", vals)
+            if cur.rowcount == 0:
+                logger.warning("update_binding no row binding=%s", binding_id)
+                return None
+        logger.info("updated binding id=%s fields=%s", binding_id, list(clean.keys()))
+        return self.get_binding(binding_id)
+
+    def delete_binding(self, binding_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM chat_agent_bindings WHERE id=?", (binding_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("deleted binding id=%s", binding_id)
+        return deleted > 0
+
+    # ── RAG Query ──
+
+    def create_rag_query(self, data: dict) -> dict:
+        qid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": qid,
+            "project_id": data["project_id"],
+            "chat_id": data.get("chat_id"),
+            "query": data["query"],
+            "mode": data.get("mode", "AUTO"),
+            "scope_folder_ids": data.get("scope_folder_ids"),
+            "top_k": data.get("top_k", 5),
+            "threshold": data.get("threshold", 0.65),
+            "results": data.get("results"),
+            "created_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO rag_queries ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created rag_query id=%s project=%s mode=%s", qid, data["project_id"], data.get("mode", "AUTO"))
+        return row

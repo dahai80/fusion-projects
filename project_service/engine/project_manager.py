@@ -1,6 +1,9 @@
 import logging
 from typing import Optional
 
+import httpx
+
+from project_service.models.artifact_ref import ArtifactRef
 from project_service.models.project import (
     Project,
     ProjectCreate,
@@ -12,6 +15,8 @@ from project_service.store.project_store import ProjectStore
 
 logger = logging.getLogger(__name__)
 
+ARTIFACTS_ENGINE_URL = "http://127.0.0.1:8892"
+
 
 class ProjectError(Exception):
     pass
@@ -22,6 +27,14 @@ class ProjectNotFound(ProjectError):
 
 
 class ProjectNotArchived(ProjectError):
+    pass
+
+
+class ArtifactAlreadyMigrated(ProjectError):
+    pass
+
+
+class ArtifactNotFound(ProjectError):
     pass
 
 
@@ -95,3 +108,63 @@ class ProjectManager:
         self.store.delete_project(project_id)
         self.file_store.remove_project(project_id)
         logger.info("project deleted id=%s", project_id)
+
+    async def _call_artifacts_engine(self, method: str, params: dict) -> dict:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": 1,
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(ARTIFACTS_ENGINE_URL, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        if "error" in data:
+            raise ProjectError(f"artifacts-engine error: {data['error']}")
+        return data.get("result", {})
+
+    async def migrate_artifact(
+        self,
+        project_id: str,
+        artifact_id: str,
+    ) -> ArtifactRef:
+        await self.get(project_id)
+        existing = self.store.get_artifact_ref(artifact_id)
+        if existing:
+            raise ArtifactAlreadyMigrated(
+                f"artifact {artifact_id} already migrated to project {existing['project_id']}"
+            )
+        result = await self._call_artifacts_engine(
+            "artifact.get", {"artifact_id": artifact_id}
+        )
+        artifact = result.get("artifact", {})
+        await self._call_artifacts_engine(
+            "artifact.move_to_project_kb", {"artifact_id": artifact_id}
+        )
+        ref_data = {
+            "project_id": project_id,
+            "artifact_id": artifact_id,
+            "artifact_name": artifact.get("name", ""),
+            "artifact_type": artifact.get("type", ""),
+            "artifact_kind": artifact.get("kind"),
+            "content_summary": artifact.get("summary"),
+            "source_session_id": artifact.get("session_id"),
+        }
+        row = self.store.create_artifact_ref(ref_data)
+        logger.info("artifact migrated artifact=%s project=%s", artifact_id, project_id)
+        return ArtifactRef.from_row(row)
+
+    async def list_artifacts(self, project_id: str) -> list[ArtifactRef]:
+        await self.get(project_id)
+        rows = self.store.list_artifact_refs(project_id)
+        return [ArtifactRef.from_row(r) for r in rows]
+
+    async def remove_artifact(self, artifact_id: str) -> bool:
+        existing = self.store.get_artifact_ref(artifact_id)
+        if not existing:
+            raise ArtifactNotFound(artifact_id)
+        removed = self.store.remove_artifact_ref(artifact_id)
+        if removed:
+            logger.info("artifact ref removed artifact=%s", artifact_id)
+        return removed
