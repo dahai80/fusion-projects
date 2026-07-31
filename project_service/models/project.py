@@ -14,6 +14,8 @@ class ProjectCreate(BaseModel):
     rag_top_k: int = config.DEFAULT_RAG_TOP_K
     rag_threshold: float = config.DEFAULT_RAG_THRESHOLD
     kb_id: Optional[str] = None
+    instructions: Optional[str] = None
+    template_id: Optional[str] = None
 
 
 class ProjectUpdate(BaseModel):

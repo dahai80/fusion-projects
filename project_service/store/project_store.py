@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS project_artifacts (
 
 CREATE TABLE IF NOT EXISTS chats (
     id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
+    project_id TEXT,
     title TEXT,
     is_starred INTEGER NOT NULL DEFAULT 0,
     agent_id TEXT,
@@ -168,6 +168,48 @@ CREATE INDEX IF NOT EXISTS idx_kfile_status ON knowledge_files(index_status);
 CREATE INDEX IF NOT EXISTS idx_binding_project ON chat_agent_bindings(project_id);
 CREATE INDEX IF NOT EXISTS idx_binding_chat ON chat_agent_bindings(chat_id);
 CREATE INDEX IF NOT EXISTS idx_rag_project ON rag_queries(project_id);
+
+CREATE TABLE IF NOT EXISTS temp_attachments (
+    id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    mime_type TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_temp_attachments_chat_id ON temp_attachments(chat_id);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    chat_id TEXT,
+    action TEXT NOT NULL,
+    agent_id TEXT,
+    details TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_project ON audit_log(project_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at);
+
+CREATE TABLE IF NOT EXISTS cowork_tasks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    payload TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_cowork_project ON cowork_tasks(project_id);
+CREATE INDEX IF NOT EXISTS idx_cowork_status ON cowork_tasks(status);
 """
 
 ALLOWED_UPDATE_FIELDS = {
@@ -201,6 +243,36 @@ class ProjectStore:
         with self._lock:
             self._conn.executescript(SCHEMA_SQL)
             self._conn.commit()
+            self._migrate_chat_project_id_nullable()
+
+    def _migrate_chat_project_id_nullable(self) -> None:
+        with self._lock:
+            cur = self._conn.execute("PRAGMA table_info(chats)")
+            cols = cur.fetchall()
+            for col in cols:
+                if col[1] == "project_id" and col[3]:  # col[3] = notnull
+                    logger.info("migrating chats.project_id to nullable")
+                    self._conn.execute(
+                        "CREATE TABLE chats_new ("
+                        "id TEXT PRIMARY KEY, project_id TEXT, title TEXT, "
+                        "is_starred INTEGER NOT NULL DEFAULT 0, agent_id TEXT, "
+                        "fork_from_chat_id TEXT, fork_from_snapshot_id TEXT, "
+                        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                        "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE)"
+                    )
+                    self._conn.execute(
+                        "INSERT INTO chats_new SELECT * FROM chats"
+                    )
+                    self._conn.execute("DROP TABLE chats")
+                    self._conn.execute("ALTER TABLE chats_new RENAME TO chats")
+                    self._conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id)"
+                    )
+                    self._conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_chats_starred ON chats(is_starred)"
+                    )
+                    self._conn.commit()
+                    break
 
     @contextmanager
     def _cursor(self) -> Iterator[sqlite3.Cursor]:
@@ -401,6 +473,20 @@ class ProjectStore:
             )
             return [dict(r) for r in cur.fetchall()]
 
+    def get_snapshot(self, snapshot_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM instruction_snapshots WHERE id=?", (snapshot_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def delete_snapshot(self, snapshot_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM instruction_snapshots WHERE id=?", (snapshot_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("deleted instruction_snapshot id=%s", snapshot_id)
+        return deleted > 0
+
     def create_artifact_ref(self, data: dict) -> dict:
         aid = data.get("id") or uuid.uuid4().hex
         now = _now()
@@ -518,7 +604,7 @@ class ProjectStore:
             return [dict(r) for r in cur.fetchall()]
 
     def update_chat(self, chat_id: str, fields: dict) -> Optional[dict]:
-        allowed = {"title", "is_starred", "agent_id"}
+        allowed = {"title", "is_starred", "agent_id", "project_id"}
         clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not clean:
             return self.get_chat(chat_id)
@@ -540,6 +626,17 @@ class ProjectStore:
         if deleted:
             logger.info("deleted chat id=%s", chat_id)
         return deleted > 0
+
+    def detach_chat(self, chat_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE chats SET project_id=NULL, updated_at=? WHERE id=?",
+                (_now(), chat_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        logger.info("detached chat id=%s", chat_id)
+        return self.get_chat(chat_id)
 
     # ── Chat Snapshot ──
 
@@ -866,3 +963,122 @@ class ProjectStore:
             )
         logger.info("created rag_query id=%s project=%s mode=%s", qid, data["project_id"], data.get("mode", "AUTO"))
         return row
+
+    # ── Temp Attachment CRUD ──
+
+    def create_temp_attachment(self, data: dict) -> dict:
+        aid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": aid,
+            "chat_id": data["chat_id"],
+            "file_path": data["file_path"],
+            "original_name": data["original_name"],
+            "file_size": data.get("file_size", 0),
+            "mime_type": data.get("mime_type"),
+            "created_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO temp_attachments ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("created temp_attachment id=%s chat=%s name=%s", aid, data["chat_id"], data["original_name"])
+        return row
+
+    def list_temp_attachments(self, chat_id: str) -> list[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM temp_attachments WHERE chat_id=? ORDER BY created_at ASC",
+                (chat_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_temp_attachment(self, attachment_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM temp_attachments WHERE id=?", (attachment_id,))
+            r = cur.fetchone()
+        return dict(r) if r else None
+
+    def delete_temp_attachment(self, attachment_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM temp_attachments WHERE id=?", (attachment_id,))
+            deleted = cur.rowcount
+        if deleted:
+            logger.info("deleted temp_attachment id=%s", attachment_id)
+        return deleted > 0
+
+    # ── Audit Log ──
+
+    def create_audit_log(self, data: dict) -> dict:
+        aid = data.get("id") or uuid.uuid4().hex
+        now = _now()
+        row = {
+            "id": aid,
+            "project_id": data["project_id"],
+            "chat_id": data.get("chat_id"),
+            "action": data["action"],
+            "agent_id": data.get("agent_id"),
+            "details": data.get("details"),
+            "created_at": now,
+        }
+        cols = ",".join(row.keys())
+        placeholders = ",".join("?" for _ in row)
+        with self._cursor() as cur:
+            cur.execute(
+                f"INSERT INTO audit_log ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+        logger.info("audit_log created id=%s project=%s action=%s", aid, data["project_id"], data["action"])
+        return row
+
+    def list_audit_log(
+        self,
+        project_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM audit_log WHERE project_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (project_id, limit, offset),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    # ── Cowork tasks ──
+
+    def create_cowork_task(self, data: dict) -> dict:
+        with self._cursor() as cur:
+            row = dict(data)
+            cols = ", ".join(row.keys())
+            placeholders = ", ".join(["?"] * len(row))
+            cur.execute(
+                f"INSERT INTO cowork_tasks ({cols}) VALUES ({placeholders})",
+                list(row.values()),
+            )
+            logger.info("cowork_task created id=%s action=%s", data["id"], data["action"])
+            return row
+
+    def get_cowork_task(self, task_id: str) -> Optional[dict]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM cowork_tasks WHERE id=?", (task_id,))
+            r = cur.fetchone()
+            return dict(r) if r else None
+
+    def update_cowork_task(self, data: dict) -> dict:
+        with self._cursor() as cur:
+            sets = []
+            vals = []
+            for k, v in data.items():
+                if k != "id":
+                    sets.append(f"{k}=?")
+                    vals.append(v)
+            vals.append(data["id"])
+            cur.execute(
+                f"UPDATE cowork_tasks SET {', '.join(sets)} WHERE id=?",
+                vals,
+            )
+            cur.execute("SELECT * FROM cowork_tasks WHERE id=?", (data["id"],))
+            return dict(cur.fetchone())

@@ -7,10 +7,11 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: Phase 0 (scaffold).** Project CRUD, instruction management, SQLite
-> store, UDS daemon, REST mirror, and tests are implemented and green. Knowledge
-> base / RAG / chat / agent binding land in later phases - see the architecture
-> doc at `~/fusion/architecture/fusion-projects-ar.md`.
+> **Status: Phase 1–3 (local).** Full project CRUD, instructions + snapshots,
+> knowledge base folders/files, chat sessions + fork + move + detach, agent
+> binding, RAG config, audit log, cowork bridge, MCP server, and full project
+> export are implemented and green. Upstream-dependent features (RAG indexing,
+> agent resolution) proxy to fusion-mlx / fusion-rag / agent-studio.
 
 ## Layout
 
@@ -23,18 +24,31 @@ fusion-projects/
 │   ├── config.py                # paths, ports, URLs, defaults (env-overridable)
 │   ├── client.py                # ProjectClient - UDS JSON-RPC client + RPCError
 │   ├── daemon_server.py         # ProjectRPCServer - UDS JSON-RPC 2.0 daemon
+│   ├── mcp_server.py            # MCP JSON-RPC server (Claude/Cursor integration)
 │   ├── models/
 │   │   ├── project.py           # ProjectCreate/ProjectUpdate/Project/ProjectListItem
-│   │   └── instruction.py       # InstructionContent/InstructionSave/InstructionSnapshot
+│   │   ├── instruction.py       # InstructionContent/InstructionSave/InstructionSnapshot
+│   │   ├── chat.py              # Chat/ChatCreate/ChatUpdate/Message/TempAttachment
+│   │   ├── knowledge.py         # KnowledgeFolder/KnowledgeFile/FolderCreate/FolderUpdate
+│   │   ├── agent_binding.py     # AgentBinding/AgentMeta/AgentPreview/PromptMergeMode
+│   │   ├── artifact_ref.py      # ArtifactRef/ArtifactMigrateRequest
+│   │   ├── audit.py             # AuditLogEntry
+│   │   └── cowork.py            # CoworkTask/CoworkTrigger
 │   ├── store/
-│   │   ├── project_store.py     # raw sqlite3 ProjectStore (no ORM)
+│   │   ├── project_store.py     # raw sqlite3 ProjectStore (15 tables, no ORM)
 │   │   └── file_store.py        # per-project storage dirs
 │   ├── engine/
 │   │   ├── project_manager.py   # async ProjectManager + domain exceptions
-│   │   └── instruction_engine.py# async InstructionEngine
+│   │   ├── instruction_engine.py# async InstructionEngine + snapshot restore/delete
+│   │   ├── chat_manager.py      # async ChatManager + move/detach/temp-attachments
+│   │   ├── knowledge_manager.py # async KnowledgeManager + file upload/replace
+│   │   ├── agent_binder.py      # async AgentBinder + upstream agent resolution
+│   │   ├── rag_coordinator.py   # async RAGCoordinator (delegates to fusion-rag)
+│   │   ├── cowork_bridge.py     # async CoworkBridge (triggers automation tasks)
+│   │   └── upstream_client.py   # async UpstreamClient with circuit breaker
 │   └── api/
-│       ├── routes.py            # FastAPI /v1 router
-│       └── rest_server.py       # create_app() + uvicorn entry (optional)
+│       ├── routes.py            # FastAPI /v1 router + MCP endpoint
+│       └── rest_server.py       # create_app() + uvicorn entry
 └── tests/                       # pytest, asyncio_mode=auto
 ```
 
@@ -60,32 +74,128 @@ pip install -e ".[test]"
 
 Logs: `logs/stdout.log`, `logs/stderr.log`. PID: `.fusion-project-svc.pid`.
 
-### REST API (optional, not auto-launched in Phase 0)
+### REST API (optional)
 
 ```bash
 python -m project_service.rest_server   # http://127.0.0.1:11440
 ```
 
-## RPC methods (UDS, JSON-RPC 2.0, `project.*` namespace)
+### MCP server (stdio mode, for Claude/Cursor)
+
+```bash
+python -m project_service.mcp_server    # communicates on stdin/stdout
+```
+
+## RPC methods (UDS, JSON-RPC 2.0)
+
+### Project
 
 | Method | Params | Returns |
 |---|---|---|
 | `project.list` | `{include_archived?, only_starred?}` | `ProjectListItem[]` |
-| `project.create` | `ProjectCreate` | `Project` |
+| `project.create` | `ProjectCreate` (name, description?, instructions?, template_id?) | `Project` |
 | `project.get` | `{project_id}` | `Project` |
 | `project.update` | `{project_id, fields: ProjectUpdate}` | `Project` |
 | `project.archive` | `{project_id}` | `Project` |
 | `project.unarchive` | `{project_id}` | `Project` |
 | `project.star` | `{project_id, starred?}` | `Project` |
 | `project.delete` | `{project_id}` | `{deleted: true}` (requires archived) |
+| `project.duplicate` | `{project_id, name?}` | `Project` |
+| `project.export` | `{project_id}` | `{zip_base64, size}` |
+| `project.artifact.list` | `{project_id, artifact_type?, limit?, offset?}` | `ArtifactRef[]` |
+| `project.artifact.migrate` | `ArtifactMigrateRequest` | `ArtifactRef` |
+| `project.artifact.export` | `{project_id, artifact_ids?}` | zip bytes |
+
+### Instructions
+
+| Method | Params | Returns |
+|---|---|---|
 | `project.instruction.get` | `{project_id}` | `InstructionContent` |
 | `project.instruction.save` | `{project_id, content}` | `InstructionContent` |
 | `project.instruction.clear` | `{project_id}` | `{cleared: bool}` |
 | `project.instruction.snapshots` | `{project_id}` | `InstructionSnapshot[]` |
+| `project.instruction.snapshot.restore` | `{snapshot_id}` | `InstructionContent` |
+| `project.instruction.snapshot.delete` | `{snapshot_id}` | `{deleted: true}` |
 
-Framing: newline-delimited JSON. Error codes: `-32700` parse, `-32601` method
-not found, `-32602` invalid/missing params, `-32000/1/2` project errors
-(generic / not-found / not-archived), `-32603` internal.
+### Chat
+
+| Method | Params | Returns |
+|---|---|---|
+| `project.chat.list` | `{project_id, only_starred?}` | `ChatListItem[]` |
+| `project.chat.create` | `{project_id, title?}` | `Chat` |
+| `project.chat.get` | `{chat_id}` | `Chat` |
+| `project.chat.update` | `{chat_id, fields}` | `Chat` |
+| `project.chat.delete` | `{chat_id}` | `{deleted: true}` |
+| `project.chat.star` | `{chat_id, starred?}` | `Chat` |
+| `project.chat.fork` | `{chat_id, label?}` | `Chat` |
+| `project.chat.move` | `{chat_id, target_project_id}` | `Chat` |
+| `project.chat.detach` | `{chat_id}` | `Chat` (project_id=null) |
+| `project.chat.message.add` | `{chat_id, content, role?}` | `Message` |
+| `project.chat.message.list` | `{chat_id, limit?, offset?}` | `{messages, total}` |
+| `project.chat.temp_attachment.add` | `{chat_id, file_path, original_name, file_size, mime_type?}` | `TempAttachment` |
+| `project.chat.temp_attachment.list` | `{chat_id}` | `TempAttachment[]` |
+| `project.chat.temp_attachment.delete` | `{attachment_id}` | `{deleted: true}` |
+
+### Knowledge
+
+| Method | Params | Returns |
+|---|---|---|
+| `project.knowledge.folder.list` | `{project_id}` | `KnowledgeFolder[]` |
+| `project.knowledge.folder.create` | `{project_id, name, parent_id?}` | `KnowledgeFolder` |
+| `project.knowledge.folder.update` | `{folder_id, name?}` | `KnowledgeFolder` |
+| `project.knowledge.folder.delete` | `{folder_id}` | `{deleted: true}` |
+| `project.knowledge.file.list` | `{project_id, folder_id?}` | `KnowledgeFile[]` |
+| `project.knowledge.file.upload` | `{project_id, source_path, original_name, folder_id?, mime_type?}` | `KnowledgeFile` |
+| `project.knowledge.file.replace` | `{file_id, source_path}` | `KnowledgeFile` |
+| `project.knowledge.file.update` | `{file_id, name?, folder_id?}` | `KnowledgeFile` |
+| `project.knowledge.file.delete` | `{file_id}` | `{deleted: true}` |
+
+### Agent binding
+
+| Method | Params | Returns |
+|---|---|---|
+| `project.agent.set` | `{project_id, agent_id, merge_mode?}` | `AgentBinding` |
+| `project.agent.get` | `{project_id, chat_id?}` | `AgentBinding` |
+| `project.agent.preview` | `{project_id}` | `AgentPreview` |
+| `project.agent.remove` | `{binding_id}` | `{deleted: true}` |
+
+### RAG
+
+| Method | Params | Returns |
+|---|---|---|
+| `project.rag.index` | `{project_id, folder_id}` | `{indexed, results}` |
+| `project.rag.query` | `{project_id, query, mode?, folder_ids?, top_k?, threshold?, chat_id?}` | results |
+| `project.rag.index.remove` | `{file_id}` | `{removed: true}` |
+| `project.rag.status` | `{project_id}` | status |
+| `project.rag.config.get` | `{project_id}` | `{rag_mode, rag_top_k, rag_threshold}` |
+| `project.rag.config.set` | `{project_id, rag_mode?, rag_top_k?, rag_threshold?}` | config |
+
+### Cowork
+
+| Method | Params | Returns |
+|---|---|---|
+| `cowork.trigger` | `{project_id, action, payload?}` | `CoworkTask` |
+| `cowork.status` | `{task_id}` | `CoworkTask` |
+
+### Audit
+
+| Method | Params | Returns |
+|---|---|---|
+| `project.audit.list` | `{project_id, limit?, offset?}` | `AuditLogEntry[]` |
+| `project.audit.log` | `{project_id, action, chat_id?, agent_id?, details?}` | `AuditLogEntry` |
+
+### Upstream
+
+| Method | Params | Returns |
+|---|---|---|
+| `project.upstream.health` | `{}` | health map |
+| `project.upstream.circuits` | `{}` | circuit status |
+
+Error codes: `-32700` parse, `-32601` method not found, `-32602` invalid/missing
+params, `-32000` project generic, `-32001` project not found, `-32002` not
+archived, `-32005` chat not found, `-32006` folder not found, `-32007` knowledge
+file not found, `-32008` agent binder error, `-32009` RAG error, `-32010`
+snapshot not found, `-32011` cowork task not found, `-32603` internal.
 
 ### Client (Python)
 
@@ -104,10 +214,55 @@ asyncio.run(main())
 
 ## REST endpoints (`/v1`)
 
-`GET /projects` · `POST /projects` · `GET|PATCH /projects/{id}` ·
-`POST /projects/{id}/archive|unarchive|star` · `DELETE /projects/{id}` (409 if
-not archived) · `GET|PUT|DELETE /projects/{id}/instructions` ·
-`GET /projects/{id}/instructions/snapshots` · `GET /health`.
+Project: `GET /projects` · `POST /projects` · `GET|PATCH /projects/{id}` ·
+`POST /projects/{id}/archive|unarchive|star|duplicate|export` ·
+`DELETE /projects/{id}`
+
+Instructions: `GET|PUT|DELETE /projects/{id}/instructions` ·
+`GET /projects/{id}/instructions/snapshots` ·
+`POST /projects/{id}/instructions/snapshots/{sid}/restore|delete`
+
+Chat: `GET /projects/{id}/chats` · `POST /projects/{id}/chats` ·
+`GET|PATCH|DELETE /chats/{id}` · `POST /chats/{id}/star|fork|move|detach` ·
+`GET /chats/{id}/messages` · `POST /chats/{id}/messages` ·
+`POST /chats/{id}/messages/stream` (SSE) ·
+`GET|POST|DELETE /chats/{id}/temp-attachments`
+
+Knowledge: `GET /projects/{id}/knowledge/folders` ·
+`POST|PATCH|DELETE /knowledge/folders/{id}` ·
+`GET /projects/{id}/knowledge/files` ·
+`POST /projects/{id}/knowledge/files/upload|replace` ·
+`PATCH|DELETE /knowledge/files/{id}`
+
+Agent: `POST /projects/{id}/agent` · `GET /projects/{id}/agent|agent/preview` ·
+`DELETE /agent-bindings/{id}`
+
+RAG: `POST /projects/{id}/rag/index|query` ·
+`DELETE /projects/{id}/rag/index/{file_id}` ·
+`GET /projects/{id}/rag/status|config` · `PUT /projects/{id}/rag/config`
+
+Artifacts: `GET /projects/{id}/artifacts` ·
+`POST /projects/{id}/artifacts/migrate|export`
+
+Audit: `GET|POST /projects/{id}/audit`
+
+Cowork: `POST /cowork/trigger` · `GET /cowork/{task_id}/status`
+
+Upstream: `GET /upstream/health|circuits`
+
+MCP: `POST /mcp` (JSON-RPC 2.0 with tools/list, tools/call, initialize)
+
+## MCP tools (for Claude/Cursor)
+
+| Tool | Description |
+|---|---|
+| `project_list` | List all projects |
+| `project_get` | Get project details |
+| `project_search_knowledge` | Search project knowledge base via RAG |
+| `project_list_knowledge` | List knowledge files in a project |
+| `project_get_instructions` | Get project instructions |
+| `project_list_chats` | List chats in a project |
+| `project_get_chat_messages` | Get messages from a chat |
 
 ## Configuration (env vars)
 
@@ -123,21 +278,19 @@ not archived) · `GET|PUT|DELETE /projects/{id}/instructions` ·
 | `FUSION_GATEWAY_URL` | `http://127.0.0.1:8100` | fusion-gateway URL |
 | `FUSION_COWORK_SOCK` | `/tmp/fusion-cowork.sock` | cowork UDS socket |
 
-> Config uses module constants + env overrides (no yaml). This intentionally
-> follows the Fusion ecosystem convention and deviates from the config.yaml
-> proposal in architecture doc Appendix C.
-
 ## Storage layout
 
 ```
 ~/.fusion-projects/
-├── data/projects.db                              # SQLite (projects, instructions, instruction_snapshots)
+├── data/projects.db                              # SQLite (15 tables)
 └── storage/{project_id}/{knowledge,attachments,snapshots,exports}/
 ```
 
-SQLite tables: `projects`, `instructions` (one active row per project, upserted),
-`instruction_snapshots` (history; auto-snapshot on instruction change). Dates are
-ISO-8601 UTC; IDs are `uuid4().hex`. Foreign keys cascade on project delete.
+SQLite tables: `projects`, `instructions`, `instruction_snapshots`,
+`project_artifacts`, `chats`, `chat_snapshots`, `messages`,
+`knowledge_folders`, `knowledge_files`, `chat_agent_bindings`, `rag_queries`,
+`temp_attachments`, `audit_log`, `cowork_tasks`. Dates are ISO-8601 UTC; IDs
+are `uuid4().hex`. Foreign keys cascade on project delete.
 
 ## Business rules
 
@@ -145,20 +298,28 @@ ISO-8601 UTC; IDs are `uuid4().hex`. Foreign keys cascade on project delete.
   error `-32002` / HTTP `409` unless the project is archived first.
 - **Instruction length:** capped at `MAX_INSTRUCTION_CHARS` (10000).
 - **Instruction snapshots:** saving a changed instruction auto-snapshots the
-  previous content (label `auto`).
+  previous content (label `auto`). Snapshots can be restored or deleted.
+- **Chat project_id nullable:** chats can be detached from a project (project_id=NULL).
+- **Full project export:** creates a ZIP with project.json, instructions.json,
+  chats + messages, knowledge folders/files, agent bindings.
+- **Cowork bridge:** triggers automation tasks (pending → running → done/failed)
+  with results stored in SQLite.
 
 ## Tests
 
 ```bash
 source .venv/bin/activate
-pytest -q          # 25 tests, no LLM/model loading (Phase 0 has no inference)
+pytest -q          # 102 tests, no LLM/model loading
 ```
 
 Coverage: `ProjectStore` CRUD/filters/cascade, `ProjectManager` lifecycle +
-archive-before-delete, `InstructionEngine` save/snapshot/clear + length
-validation, UDS `ProjectRPCServer` end-to-end via `ProjectClient`, REST API via
-`httpx.ASGITransport`. All tests use `tmp_path` - the real `~/.fusion-projects`
-is never touched.
+archive-before-delete + duplicate + export, `InstructionEngine` save/snapshot/
+restore/delete + length validation, `ChatManager` move/detach/temp-attachments,
+`KnowledgeManager` folder/file CRUD + upload/replace, `AgentBinder` set/get/
+preview, `RAGCoordinator` config, `CoworkBridge` trigger/status, `MCPServer`
+initialize/tools-list/parse-error, UDS `ProjectRPCServer` end-to-end via
+`ProjectClient`, REST API via `httpx.ASGITransport`. All tests use `tmp_path` -
+the real `~/.fusion-projects` is never touched.
 
 ## Conventions
 
@@ -166,6 +327,8 @@ is never touched.
   commit/rollback + `threading.RLock`.
 - UDS JSON-RPC daemon hand-rolled on `asyncio.start_unix_server` (no RPC library)
   - mirrors `fusion-cowork` `DeskRPCServer`.
+- MCP server follows the 2024-11-05 protocol spec (initialize → tools/list →
+  tools/call). Available via `POST /v1/mcp` (HTTP) or stdio (CLI).
 - `logger = logging.getLogger(__name__)` per module; `logging.basicConfig` only in
   entry points.
 - 4-space indentation, no docstrings.
