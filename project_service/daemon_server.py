@@ -9,6 +9,8 @@ from pydantic import ValidationError
 from project_service import config
 from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.project_manager import (
+    ArtifactAlreadyMigrated,
+    ArtifactNotFound,
     ProjectError,
     ProjectNotArchived,
     ProjectNotFound,
@@ -45,6 +47,9 @@ class ProjectRPCServer:
             "project.instruction.save": self._instr_save,
             "project.instruction.clear": self._instr_clear,
             "project.instruction.snapshots": self._instr_snapshots,
+            "project.artifact.migrate": self._artifact_migrate,
+            "project.artifact.list": self._artifact_list,
+            "project.artifact.remove": self._artifact_remove,
         }
 
     async def _list(self, params: Any) -> list[dict]:
@@ -104,6 +109,20 @@ class ProjectRPCServer:
         rows = await self.instruction_engine.list_snapshots(params["project_id"])
         return [r.model_dump() for r in rows]
 
+    async def _artifact_migrate(self, params: Any) -> dict:
+        ref = await self.project_manager.migrate_artifact(
+            params["project_id"], params["artifact_id"]
+        )
+        return ref.model_dump()
+
+    async def _artifact_list(self, params: Any) -> list[dict]:
+        refs = await self.project_manager.list_artifacts(params["project_id"])
+        return [r.model_dump() for r in refs]
+
+    async def _artifact_remove(self, params: Any) -> dict:
+        ok = await self.project_manager.remove_artifact(params["artifact_id"])
+        return {"removed": ok}
+
     async def dispatch(self, method: str, params: Any) -> Any:
         handler = self._handlers.get(method)
         if handler is None:
@@ -128,6 +147,10 @@ class ProjectRPCServer:
             return _error(req_id, -32001, "project not found: " + str(e))
         except ProjectNotArchived as e:
             return _error(req_id, -32002, "project not archived: " + str(e))
+        except ArtifactAlreadyMigrated as e:
+            return _error(req_id, -32003, "artifact already migrated: " + str(e))
+        except ArtifactNotFound as e:
+            return _error(req_id, -32004, "artifact not found: " + str(e))
         except ProjectError as e:
             return _error(req_id, -32000, "project error: " + str(e))
         except ValidationError as e:

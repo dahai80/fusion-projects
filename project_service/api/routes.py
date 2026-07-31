@@ -4,10 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.project_manager import (
+    ArtifactAlreadyMigrated,
+    ArtifactNotFound,
     ProjectNotArchived,
     ProjectNotFound,
     ProjectManager,
 )
+from project_service.models.artifact_ref import ArtifactMigrateRequest, ArtifactRef
 from project_service.models.instruction import (
     InstructionContent,
     InstructionSave,
@@ -166,3 +169,40 @@ async def list_instruction_snapshots(
         return await ie.list_snapshots(project_id)
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="project not found")
+
+
+@router.get("/projects/{project_id}/artifacts", response_model=list[ArtifactRef])
+async def list_project_artifacts(
+    project_id: str,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        return await pm.list_artifacts(project_id)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+
+
+@router.post("/projects/{project_id}/artifacts", response_model=ArtifactRef, status_code=201)
+async def migrate_artifact(
+    project_id: str,
+    payload: ArtifactMigrateRequest,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        return await pm.migrate_artifact(project_id, payload.artifact_id)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="project not found")
+    except ArtifactAlreadyMigrated as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.delete("/projects/{project_id}/artifacts/{artifact_id}", status_code=204)
+async def remove_project_artifact(
+    project_id: str,
+    artifact_id: str,
+    pm: ProjectManager = Depends(get_project_manager),
+):
+    try:
+        await pm.remove_artifact(artifact_id)
+    except ArtifactNotFound:
+        raise HTTPException(status_code=404, detail="artifact not found")
