@@ -50,6 +50,7 @@ class ProjectRPCServer:
             "project.artifact.migrate": self._artifact_migrate,
             "project.artifact.list": self._artifact_list,
             "project.artifact.remove": self._artifact_remove,
+            "project.artifact.export": self._artifact_export,
         }
 
     async def _list(self, params: Any) -> list[dict]:
@@ -116,12 +117,27 @@ class ProjectRPCServer:
         return ref.model_dump()
 
     async def _artifact_list(self, params: Any) -> list[dict]:
-        refs = await self.project_manager.list_artifacts(params["project_id"])
+        params = params or {}
+        refs = await self.project_manager.list_artifacts(
+            params["project_id"],
+            artifact_type=params.get("type"),
+            artifact_kind=params.get("kind"),
+            search=params.get("search"),
+        )
         return [r.model_dump() for r in refs]
 
     async def _artifact_remove(self, params: Any) -> dict:
         ok = await self.project_manager.remove_artifact(params["artifact_id"])
         return {"removed": ok}
+
+    async def _artifact_export(self, params: Any) -> dict:
+        params = params or {}
+        import base64
+        data = await self.project_manager.export_artifacts(
+            params["project_id"],
+            artifact_ids=params.get("artifact_ids"),
+        )
+        return {"zip_base64": base64.b64encode(data).decode("ascii"), "size": len(data)}
 
     async def dispatch(self, method: str, params: Any) -> Any:
         handler = self._handlers.get(method)

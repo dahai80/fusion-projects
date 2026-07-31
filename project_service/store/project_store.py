@@ -255,8 +255,13 @@ class ProjectStore:
         return self.get_project(pid)
 
     def get_project(self, project_id: str) -> Optional[dict]:
+        sql = (
+            "SELECT p.*, "
+            "(SELECT COUNT(*) FROM project_artifacts WHERE project_id=p.id) AS artifact_count "
+            "FROM projects p WHERE p.id=?"
+        )
         with self._cursor() as cur:
-            cur.execute("SELECT * FROM projects WHERE id=?", (project_id,))
+            cur.execute(sql, (project_id,))
             r = cur.fetchone()
         return dict(r) if r else None
 
@@ -268,14 +273,16 @@ class ProjectStore:
         clauses: list[str] = []
         params: list[Any] = []
         if not include_archived:
-            clauses.append("is_archived=0")
+            clauses.append("p.is_archived=0")
         if only_starred:
-            clauses.append("is_starred=1")
+            clauses.append("p.is_starred=1")
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         sql = (
-            "SELECT * FROM projects"
+            "SELECT p.*, "
+            "(SELECT COUNT(*) FROM project_artifacts WHERE project_id=p.id) AS artifact_count "
+            "FROM projects p"
             + where
-            + " ORDER BY is_starred DESC, updated_at DESC"
+            + " ORDER BY p.is_starred DESC, p.updated_at DESC"
         )
         with self._cursor() as cur:
             cur.execute(sql, params)
@@ -430,12 +437,28 @@ class ProjectStore:
             r = cur.fetchone()
         return dict(r) if r else None
 
-    def list_artifact_refs(self, project_id: str) -> list[dict]:
+    def list_artifact_refs(
+        self,
+        project_id: str,
+        artifact_type: Optional[str] = None,
+        artifact_kind: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> list[dict]:
+        clauses = ["project_id=?"]
+        params: list[Any] = [project_id]
+        if artifact_type:
+            clauses.append("artifact_type=?")
+            params.append(artifact_type)
+        if artifact_kind:
+            clauses.append("artifact_kind=?")
+            params.append(artifact_kind)
+        if search:
+            clauses.append("artifact_name LIKE ?")
+            params.append(f"%{search}%")
+        where = " AND ".join(clauses)
+        sql = f"SELECT * FROM project_artifacts WHERE {where} ORDER BY migrated_at DESC"
         with self._cursor() as cur:
-            cur.execute(
-                "SELECT * FROM project_artifacts WHERE project_id=? ORDER BY migrated_at DESC",
-                (project_id,),
-            )
+            cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
 
     def remove_artifact_ref(self, artifact_id: str) -> bool:
