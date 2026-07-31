@@ -60,7 +60,7 @@ class RAGCoordinator:
         result = await self.upstream.rag_upload_doc(
             kb_id=kb_id,
             file_path=kfile["file_path"],
-            contextualize=False,
+            contextualize=True,
         )
         if "error" in result:
             self.store.update_knowledge_file(file_id, {"index_status": "FAILED"})
@@ -122,10 +122,19 @@ class RAGCoordinator:
             "threshold": rag_threshold,
         })
         kb_id = await self._ensure_kb(project_id)
+        folder_prefix = None
+        if folder_ids:
+            storage_root = str(config.BASE_DIR)
+            first_folder = self.store.get_folder(folder_ids[0])
+            if first_folder:
+                folder_prefix = f"{storage_root}/storage/{project_id}/knowledge/{folder_ids[0]}"
+            if len(folder_ids) > 1:
+                logger.warning("folder_prefix only supports single folder, using first: %s", folder_ids[0])
         result = await self.upstream.rag_search(
             kb_id=kb_id,
             query=query_text,
             top_k=rag_top_k,
+            folder_prefix=folder_prefix,
         )
         if "error" in result:
             logger.warning("rag query failed project=%s error=%s", project_id, result.get("detail"))

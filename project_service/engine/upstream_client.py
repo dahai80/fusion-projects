@@ -203,8 +203,10 @@ class UpstreamClient:
         payload = {"file_paths": file_paths, "contextualize": contextualize}
         return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/documents/batch", json_data=payload)
 
-    async def rag_search(self, kb_id: str, query: str, *, top_k: int = 5) -> dict:
-        payload = {"query": query, "top_k": top_k}
+    async def rag_search(self, kb_id: str, query: str, *, top_k: int = 5, folder_prefix: str | None = None) -> dict:
+        payload: dict = {"query": query, "top_k": top_k}
+        if folder_prefix:
+            payload["folder_prefix"] = folder_prefix
         return await self._request("rag", "POST", f"{config.RAG_BASE_URL}/kb/bases/{kb_id}/search", json_data=payload)
 
     async def rag_ask(self, kb_id: str, query: str, *, top_k: int = 5) -> dict:
