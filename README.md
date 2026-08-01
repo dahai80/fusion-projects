@@ -1,5 +1,7 @@
 # fusion-project-svc
 
+**English** | [中文](README_CN.md)
+
 Local-first AI **project asset container** service for the Fusion ecosystem. A
 *Project* is an isolated work domain that bundles global instructions, a
 persistent knowledge base (RAG), isolated chat sessions, and a bound Fusion
