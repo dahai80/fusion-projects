@@ -4,7 +4,8 @@
 
 Fusion 生态的本地优先 AI **项目资产容器**服务。*项目（Project）* 是一个隔离的工作域，捆绑全局指令、持久化知识库（RAG）、隔离的聊天会话以及绑定的 Fusion Agent。本服务负责项目元数据、指令和存储布局，对外提供 UDS JSON-RPC 守护进程（供 Fusion 桌面端/Agent 调用）以及可选的 REST API。
 
-> **状态：Phase 1–3（本地 + 上游）。** 完整的项目 CRUD、指令 + 快照、知识库文件夹/文件、聊天会话 + 分支 + 移动 + 解绑、Agent 绑定、RAG 索引 + 检索、审计日志、协同桥接、MCP 服务及完整项目导出均已实现且全量通过。RAG 链路端到端验证通过：project-svc → fusion-rag → fusion-mlx，使用 BGE-M3 嵌入（score ≥ 0.6）。
+> **状态：v0.1.1 — Phase 1–3（本地 + 上游）+ 架构合规 P1-S2 整改。**
+> 完整的项目 CRUD、指令 + 快照、知识库文件夹/文件、聊天会话 + 分支 + 移动 + 解绑、Agent 绑定、RAG 索引 + 检索、审计日志、MCP 服务及完整项目导出均已实现且全量通过。协同/上游路由已移除（P1-S2 合规）。RAG 链路端到端验证通过：project-svc → fusion-rag → fusion-mlx，使用 BGE-M3 嵌入（score ≥ 0.6）。
 
 ## 目录结构
 
@@ -163,13 +164,6 @@ python -m project_service.mcp_server    # 通过 stdin/stdout 通信
 | `project.rag.config.get` | `{project_id}` | `{rag_mode, rag_top_k, rag_threshold}` |
 | `project.rag.config.set` | `{project_id, rag_mode?, rag_top_k?, rag_threshold?}` | 配置 |
 
-### 协同
-
-| 方法 | 参数 | 返回 |
-|---|---|---|
-| `cowork.trigger` | `{project_id, action, payload?}` | `CoworkTask` |
-| `cowork.status` | `{task_id}` | `CoworkTask` |
-
 ### 审计
 
 | 方法 | 参数 | 返回 |
@@ -177,14 +171,7 @@ python -m project_service.mcp_server    # 通过 stdin/stdout 通信
 | `project.audit.list` | `{project_id, limit?, offset?}` | `AuditLogEntry[]` |
 | `project.audit.log` | `{project_id, action, chat_id?, agent_id?, details?}` | `AuditLogEntry` |
 
-### 上游
-
-| 方法 | 参数 | 返回 |
-|---|---|---|
-| `project.upstream.health` | `{}` | 健康状态映射 |
-| `project.upstream.circuits` | `{}` | 熔断器状态 |
-
-错误码：`-32700` 解析错误，`-32601` 方法未找到，`-32602` 参数无效/缺失，`-32000` 项目通用错误，`-32001` 项目未找到，`-32002` 未归档，`-32005` 聊天未找到，`-32006` 文件夹未找到，`-32007` 知识文件未找到，`-32008` Agent 绑定错误，`-32009` RAG 错误，`-32010` 快照未找到，`-32011` 协同任务未找到，`-32603` 内部错误。
+错误码：`-32700` 解析错误，`-32601` 方法未找到，`-32602` 参数无效/缺失，`-32000` 项目通用错误，`-32001` 项目未找到，`-32002` 未归档，`-32005` 聊天未找到，`-32006` 文件夹未找到，`-32007` 知识文件未找到，`-32008` Agent 绑定错误，`-32009` RAG 错误，`-32010` 快照未找到，`-32603` 内部错误。
 
 ### 客户端（Python）
 
@@ -223,8 +210,8 @@ asyncio.run(main())
 `POST /projects/{id}/knowledge/files/upload|replace` ·
 `PATCH|DELETE /knowledge/files/{id}`
 
-Agent：`POST /projects/{id}/agent` · `GET /projects/{id}/agent|agent/preview` ·
-`DELETE /agent-bindings/{id}`
+Agent：`POST /projects/{id}/agent` · `GET /projects/{id}/agent` ·
+`DELETE /projects/{id}/agent` · `POST /projects/{id}/system-prompt`
 
 RAG：`POST /projects/{id}/rag/index|query` ·
 `DELETE /projects/{id}/rag/index/{file_id}` ·
@@ -234,10 +221,6 @@ RAG：`POST /projects/{id}/rag/index|query` ·
 `POST /projects/{id}/artifacts/migrate|export`
 
 审计：`GET|POST /projects/{id}/audit`
-
-协同：`POST /cowork/trigger` · `GET /cowork/{task_id}/status`
-
-上游：`GET /upstream/health|circuits`
 
 MCP：`POST /mcp`（JSON-RPC 2.0，支持 tools/list、tools/call、initialize）
 
@@ -324,7 +307,7 @@ SQLite 表：`projects`、`instructions`、`instruction_snapshots`、
 
 ```bash
 source .venv/bin/activate
-pytest -q          # 102 个测试，无需 LLM/模型加载
+pytest -q          # 101 个测试，无需 LLM/模型加载
 ```
 
 覆盖范围：`ProjectStore` CRUD/过滤/级联，`ProjectManager` 生命周期 +

@@ -9,7 +9,6 @@ from pydantic import ValidationError
 from project_service import config
 from project_service.engine.agent_binder import AgentBinder, AgentBinderError
 from project_service.engine.chat_manager import ChatManager, ChatNotFound
-from project_service.engine.cowork_bridge import CoworkBridge, CoworkTaskNotFound
 from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
@@ -27,12 +26,11 @@ from project_service.engine.project_manager import (
 from project_service.engine.rag_coordinator import RAGCoordinator, RAGError
 from project_service.engine.upstream_client import UpstreamClient
 from project_service.models.agent_binding import PromptMergeMode
-from project_service.models.chat import ChatCreate, ChatMoveRequest, ChatUpdate, MessageCreate
+from project_service.models.chat import ChatCreate, ChatUpdate, MessageCreate
 from project_service.models.instruction import InstructionSave
 from project_service.models.knowledge import FolderCreate, FolderUpdate
 from project_service.models.project import ProjectCreate, ProjectUpdate
 from project_service.models.audit import AuditLogEntry
-from project_service.models.cowork import CoworkTrigger
 from project_service.store.project_store import ProjectStore
 
 logger = logging.getLogger(__name__)
@@ -70,7 +68,7 @@ class ProjectRPCServer:
         self.rag_coordinator = rag_coordinator or RAGCoordinator(
             store=pm_store, project_manager=self.project_manager, upstream=upstream
         )
-        self.cowork_bridge = CoworkBridge(store=pm_store)
+        self.cowork_bridge = None
         self.upstream = upstream
         self._handlers: dict[str, Callable[..., Awaitable[Any]]] = {
             "project.list": self._list,
@@ -138,10 +136,6 @@ class ProjectRPCServer:
             "project.rag.status": self._rag_status,
             "project.rag.config.get": self._rag_config_get,
             "project.rag.config.set": self._rag_config_set,
-            "project.upstream.health": self._upstream_health,
-            "project.upstream.circuits": self._upstream_circuits,
-            "cowork.trigger": self._cowork_trigger,
-            "cowork.status": self._cowork_status,
             "project.export": self._export_project,
         }
 
@@ -549,25 +543,6 @@ class ProjectRPCServer:
             "rag_threshold": proj.rag_threshold,
         }
 
-    # ── Upstream handlers ──
-
-    async def _upstream_health(self, params: Any) -> dict:
-        return await self.upstream.health_check_all()
-
-    async def _upstream_circuits(self, params: Any) -> dict:
-        return self.upstream.get_circuit_status()
-
-    # ── Cowork handlers ──
-
-    async def _cowork_trigger(self, params: Any) -> dict:
-        trigger = CoworkTrigger(**params)
-        task = await self.cowork_bridge.trigger_task(trigger)
-        return task.model_dump()
-
-    async def _cowork_status(self, params: Any) -> dict:
-        task = await self.cowork_bridge.get_status(params["task_id"])
-        return task.model_dump()
-
     # ── Export handler ──
 
     async def _export_project(self, params: Any) -> dict:
@@ -617,8 +592,6 @@ class ProjectRPCServer:
             return _error(req_id, -32008, "agent binder error: " + str(e))
         except RAGError as e:
             return _error(req_id, -32009, "rag error: " + str(e))
-        except CoworkTaskNotFound as e:
-            return _error(req_id, -32011, "cowork task not found: " + str(e))
         except ProjectError as e:
             return _error(req_id, -32000, "project error: " + str(e))
         except ValidationError as e:

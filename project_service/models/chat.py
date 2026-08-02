@@ -123,9 +123,6 @@ class Message(BaseModel):
     chat_id: str
     role: str
     content: str
-    rag_sources: Optional[str] = None
-    tool_calls: Optional[str] = None
-    token_usage: Optional[str] = None
     created_at: str
 
     @classmethod
@@ -135,8 +132,5 @@ class Message(BaseModel):
             chat_id=row["chat_id"],
             role=row["role"],
             content=row["content"],
-            rag_sources=row["rag_sources"],
-            tool_calls=row["tool_calls"],
-            token_usage=row["token_usage"],
             created_at=row["created_at"],
         )

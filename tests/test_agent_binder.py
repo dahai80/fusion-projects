@@ -1,6 +1,6 @@
 import pytest
 
-from project_service.engine.agent_binder import AgentBinder, AgentBinderError
+from project_service.engine.agent_binder import AgentBinder
 from project_service.engine.chat_manager import ChatManager
 from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.project_manager import ProjectManager
@@ -48,7 +48,7 @@ async def project_id(binder):
 
 
 async def _create_chat(store, project_id):
-    cm = ChatManager(store=store, project_manager=store._pm if hasattr(store, "_pm") else None)
+    _cm = ChatManager(store=store, project_manager=store._pm if hasattr(store, "_pm") else None)
     return None
 
 

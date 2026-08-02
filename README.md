@@ -9,10 +9,11 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: Phase 1–3 (local + upstream).** Full project CRUD, instructions +
-> snapshots, knowledge base folders/files, chat sessions + fork + move + detach,
-> agent binding, RAG indexing + search, audit log, cowork bridge, MCP server,
-> and full project export are implemented and green. RAG chain verified E2E:
+> **Status: v0.1.1 — Phase 1–3 (local + upstream) + architecture compliance P1-S2.**
+> Full project CRUD, instructions + snapshots, knowledge base folders/files,
+> chat sessions + fork + move + detach, agent binding, RAG indexing + search,
+> audit log, MCP server, and full project export are implemented and green.
+> Cowork/upstream routes removed (P1-S2 compliance). RAG chain verified E2E:
 > project-svc → fusion-rag → fusion-mlx with BGE-M3 embeddings (score ≥ 0.6).
 
 ## Layout
@@ -172,13 +173,6 @@ python -m project_service.mcp_server    # communicates on stdin/stdout
 | `project.rag.config.get` | `{project_id}` | `{rag_mode, rag_top_k, rag_threshold}` |
 | `project.rag.config.set` | `{project_id, rag_mode?, rag_top_k?, rag_threshold?}` | config |
 
-### Cowork
-
-| Method | Params | Returns |
-|---|---|---|
-| `cowork.trigger` | `{project_id, action, payload?}` | `CoworkTask` |
-| `cowork.status` | `{task_id}` | `CoworkTask` |
-
 ### Audit
 
 | Method | Params | Returns |
@@ -186,18 +180,11 @@ python -m project_service.mcp_server    # communicates on stdin/stdout
 | `project.audit.list` | `{project_id, limit?, offset?}` | `AuditLogEntry[]` |
 | `project.audit.log` | `{project_id, action, chat_id?, agent_id?, details?}` | `AuditLogEntry` |
 
-### Upstream
-
-| Method | Params | Returns |
-|---|---|---|
-| `project.upstream.health` | `{}` | health map |
-| `project.upstream.circuits` | `{}` | circuit status |
-
 Error codes: `-32700` parse, `-32601` method not found, `-32602` invalid/missing
 params, `-32000` project generic, `-32001` project not found, `-32002` not
 archived, `-32005` chat not found, `-32006` folder not found, `-32007` knowledge
 file not found, `-32008` agent binder error, `-32009` RAG error, `-32010`
-snapshot not found, `-32011` cowork task not found, `-32603` internal.
+snapshot not found, `-32603` internal.
 
 ### Client (Python)
 
@@ -236,8 +223,8 @@ Knowledge: `GET /projects/{id}/knowledge/folders` ·
 `POST /projects/{id}/knowledge/files/upload|replace` ·
 `PATCH|DELETE /knowledge/files/{id}`
 
-Agent: `POST /projects/{id}/agent` · `GET /projects/{id}/agent|agent/preview` ·
-`DELETE /agent-bindings/{id}`
+Agent: `POST /projects/{id}/agent` · `GET /projects/{id}/agent` ·
+`DELETE /projects/{id}/agent` · `POST /projects/{id}/system-prompt`
 
 RAG: `POST /projects/{id}/rag/index|query` ·
 `DELETE /projects/{id}/rag/index/{file_id}` ·
@@ -247,10 +234,6 @@ Artifacts: `GET /projects/{id}/artifacts` ·
 `POST /projects/{id}/artifacts/migrate|export`
 
 Audit: `GET|POST /projects/{id}/audit`
-
-Cowork: `POST /cowork/trigger` · `GET /cowork/{task_id}/status`
-
-Upstream: `GET /upstream/health|circuits`
 
 MCP: `POST /mcp` (JSON-RPC 2.0 with tools/list, tools/call, initialize)
 
@@ -339,7 +322,7 @@ are `uuid4().hex`. Foreign keys cascade on project delete.
 
 ```bash
 source .venv/bin/activate
-pytest -q          # 102 tests, no LLM/model loading
+pytest -q          # 101 tests, no LLM/model loading
 ```
 
 Coverage: `ProjectStore` CRUD/filters/cascade, `ProjectManager` lifecycle +

@@ -3,7 +3,6 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from project_service import config
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
 from project_service.models.knowledge import (
     FileIndexStatus,

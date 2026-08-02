@@ -330,28 +330,18 @@ async def test_mcp_parse_error():
 
 
 @pytest.mark.asyncio
-async def test_cowork_trigger_and_status(rpc):
-    proj = await rpc.dispatch("project.create", {"name": "cw-proj"})
-    pid = proj["id"]
-    task = await rpc.dispatch(
-        "cowork.trigger",
-        {"project_id": pid, "action": "auto_index", "payload": '{"folder":"docs"}'},
+async def test_cowork_methods_removed(rpc):
+    resp = await rpc.handle_request(
+        _req("cowork.trigger", {"project_id": "x", "action": "test"})
     )
-    assert task["status"] == "pending"
-    assert task["action"] == "auto_index"
-    task_id = task["id"]
-    status = await rpc.dispatch("cowork.status", {"task_id": task_id})
-    assert status["id"] == task_id
-    assert status["project_id"] == pid
+    parsed = _parse(resp)
+    assert parsed["error"]["code"] == -32601
 
-
-@pytest.mark.asyncio
-async def test_cowork_task_not_found(rpc):
     resp = await rpc.handle_request(
         _req("cowork.status", {"task_id": "nonexistent"})
     )
     parsed = _parse(resp)
-    assert parsed["error"]["code"] == -32011
+    assert parsed["error"]["code"] == -32601
 
 
 @pytest.mark.asyncio

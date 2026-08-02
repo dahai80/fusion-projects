@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 from typing import Optional
@@ -6,9 +5,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from project_service.engine.agent_binder import AgentBinder, AgentBinderError
+from project_service.engine.agent_binder import AgentBinder
 from project_service.engine.chat_manager import ChatManager, ChatNotFound
-from project_service.engine.cowork_bridge import CoworkBridge, CoworkTaskNotFound
 from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
@@ -23,11 +21,8 @@ from project_service.engine.project_manager import (
     ProjectManager,
 )
 from project_service.engine.rag_coordinator import RAGCoordinator, RAGError
-from project_service.engine.upstream_client import UpstreamClient
 from project_service.models.agent_binding import (
     AgentBinding,
-    AgentMeta,
-    AgentPreview,
     PromptMergeMode,
 )
 from project_service.models.artifact_ref import ArtifactMigrateRequest, ArtifactRef
@@ -44,7 +39,6 @@ from project_service.models.chat import (
     MessageCreate,
     TempAttachment,
 )
-from project_service.models.cowork import CoworkTrigger
 from project_service.models.instruction import (
     InstructionContent,
     InstructionSave,
@@ -92,10 +86,6 @@ def get_agent_binder(request: Request) -> AgentBinder:
 
 def get_rag_coordinator(request: Request) -> RAGCoordinator:
     return request.app.state.rag_coordinator
-
-
-def get_upstream_client(request: Request) -> UpstreamClient:
-    return request.app.state.upstream_client
 
 
 # ── Project endpoints ──
@@ -844,24 +834,6 @@ async def remove_agent_binding(
     await ab.remove_binding(project_id, chat_id=chat_id)
 
 
-@router.get("/agents", response_model=list[AgentMeta])
-async def list_available_agents(
-    ab: AgentBinder = Depends(get_agent_binder),
-):
-    return await ab.list_available_agents()
-
-
-@router.get("/agents/{agent_id}", response_model=AgentPreview)
-async def get_agent_preview(
-    agent_id: str,
-    ab: AgentBinder = Depends(get_agent_binder),
-):
-    preview = await ab.get_agent_preview(agent_id)
-    if not preview:
-        raise HTTPException(status_code=404, detail="agent not found or unavailable")
-    return preview
-
-
 @router.post("/projects/{project_id}/system-prompt")
 async def build_system_prompt(
     project_id: str,
@@ -991,23 +963,6 @@ async def set_rag_config(
         raise HTTPException(status_code=404, detail="project not found")
 
 
-# ── Upstream health ──
-
-
-@router.get("/upstream/health")
-async def upstream_health(
-    uc: UpstreamClient = Depends(get_upstream_client),
-):
-    return await uc.health_check_all()
-
-
-@router.get("/upstream/circuits")
-async def upstream_circuits(
-    uc: UpstreamClient = Depends(get_upstream_client),
-):
-    return uc.get_circuit_status()
-
-
 # ── Audit log endpoints ──
 
 
@@ -1066,31 +1021,3 @@ async def mcp_endpoint(
     if not resp:
         return Response(status_code=204)
     return Response(content=resp, media_type="application/json")
-
-
-# ── Cowork endpoints ──
-
-
-def get_cowork_bridge(request: Request) -> CoworkBridge:
-    return request.app.state.cowork_bridge
-
-
-@router.post("/cowork/trigger")
-async def cowork_trigger(
-    payload: CoworkTrigger,
-    cb: CoworkBridge = Depends(get_cowork_bridge),
-):
-    task = await cb.trigger_task(payload)
-    return task.model_dump()
-
-
-@router.get("/cowork/{task_id}/status")
-async def cowork_status(
-    task_id: str,
-    cb: CoworkBridge = Depends(get_cowork_bridge),
-):
-    try:
-        task = await cb.get_status(task_id)
-        return task.model_dump()
-    except CoworkTaskNotFound:
-        raise HTTPException(status_code=404, detail="cowork task not found")

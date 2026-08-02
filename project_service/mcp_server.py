@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 from typing import Any, Awaitable, Callable, Optional
 
 from project_service.daemon_server import ProjectRPCServer
@@ -206,7 +205,7 @@ async def run_mcp_stdio() -> None:
         else:
             reader.feed_eof()
 
-    transport = asyncio.SafeStreamReaderProtocol(reader)
+    _transport = asyncio.SafeStreamReaderProtocol(reader)
     loop.set_reader(sys.stdin.fileno(), _on_stdin_data)
 
     try:

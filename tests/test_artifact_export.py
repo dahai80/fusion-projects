@@ -1,6 +1,5 @@
 import pytest
 
-from project_service.models.artifact_ref import ArtifactRef
 from project_service.store.project_store import ProjectStore
 
 

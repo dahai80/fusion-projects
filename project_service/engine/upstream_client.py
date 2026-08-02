@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import time
 from enum import Enum
@@ -122,7 +121,7 @@ class UpstreamClient:
         cb = self._circuit(service)
         if not cb.can_call():
             logger.warning("circuit %s OPEN, rejecting call to %s", service, url)
-            return {"error": f"circuit_open", "service": service, "detail": "service unavailable"}
+            return {"error": "circuit_open", "service": service, "detail": "service unavailable"}
         cb.on_call_start()
         try:
             resp = await self._http.request(

@@ -5,7 +5,6 @@ from typing import Optional
 from project_service import config
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
 from project_service.engine.upstream_client import UpstreamClient
-from project_service.models.knowledge import KnowledgeFile
 from project_service.store.project_store import ProjectStore
 
 logger = logging.getLogger(__name__)

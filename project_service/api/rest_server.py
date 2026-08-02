@@ -6,7 +6,6 @@ from fastapi import FastAPI
 
 from project_service import config
 from project_service.api.routes import router
-from project_service.engine.cowork_bridge import CoworkBridge
 from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.project_manager import ProjectManager
 from project_service.mcp_server import MCPServer
@@ -18,14 +17,12 @@ def create_app(
     project_manager: Optional[ProjectManager] = None,
     instruction_engine: Optional[InstructionEngine] = None,
 ) -> FastAPI:
-    app = FastAPI(title="Fusion-Projects", version="0.1.0")
+    app = FastAPI(title="Fusion-Projects", version="0.1.1")
     app.state.project_manager = project_manager or ProjectManager()
     app.state.instruction_engine = instruction_engine or InstructionEngine(
         project_manager=app.state.project_manager
     )
     app.state.mcp_server = MCPServer()
-    pm_store = getattr(app.state.project_manager, "store", None)
-    app.state.cowork_bridge = CoworkBridge(store=pm_store) if pm_store else CoworkBridge()
     app.include_router(router)
 
     @app.get("/health")

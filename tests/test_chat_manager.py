@@ -2,7 +2,7 @@ import pytest
 
 from project_service.engine.chat_manager import ChatManager, ChatNotFound
 from project_service.engine.project_manager import ProjectManager
-from project_service.models.chat import ChatCreate, ChatUpdate, MessageCreate
+from project_service.models.chat import ChatCreate, MessageCreate
 from project_service.models.project import ProjectCreate
 from project_service.store.project_store import ProjectStore
 

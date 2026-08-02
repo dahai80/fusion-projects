@@ -6,7 +6,7 @@ from project_service.models.instruction import (
     InstructionSave,
     InstructionSnapshot,
 )
-from project_service.engine.project_manager import ProjectManager, ProjectNotFound
+from project_service.engine.project_manager import ProjectManager
 from project_service.store.project_store import ProjectStore
 
 logger = logging.getLogger(__name__)
