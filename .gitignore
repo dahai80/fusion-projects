@@ -28,6 +28,7 @@ htmlcov/
 .remember/
 CLAUDE.md
 PLAN.md
+ARCHITECTURE_COMPLIANCE.md
 
 # Logs
 logs/
