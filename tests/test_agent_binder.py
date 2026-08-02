@@ -49,7 +49,6 @@ async def project_id(binder):
 
 async def _create_chat(store, project_id):
     _cm = ChatManager(store=store, project_manager=store._pm if hasattr(store, "_pm") else None)
-    return None
 
 
 @pytest.mark.asyncio

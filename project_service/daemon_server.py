@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from project_service import config
 from project_service.engine.agent_binder import AgentBinder, AgentBinderError
 from project_service.engine.chat_manager import ChatManager, ChatNotFound
+from project_service.engine.gateway_client import GatewayClient
 from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
@@ -24,7 +25,6 @@ from project_service.engine.project_manager import (
     ProjectManager,
 )
 from project_service.engine.rag_coordinator import RAGCoordinator, RAGError
-from project_service.engine.upstream_client import UpstreamClient
 from project_service.models.agent_binding import PromptMergeMode
 from project_service.models.chat import ChatCreate, ChatUpdate, MessageCreate
 from project_service.models.instruction import InstructionSave
@@ -47,10 +47,10 @@ class ProjectRPCServer:
         knowledge_manager: Optional[KnowledgeManager] = None,
         agent_binder: Optional[AgentBinder] = None,
         rag_coordinator: Optional[RAGCoordinator] = None,
-        upstream: Optional[UpstreamClient] = None,
+        upstream: Optional[GatewayClient] = None,
     ) -> None:
         store = ProjectStore()
-        upstream = upstream or UpstreamClient()
+        upstream = upstream or GatewayClient()
         self.project_manager = project_manager or ProjectManager(store=store)
         pm_store = getattr(self.project_manager, "store", store)
         self.instruction_engine = instruction_engine or InstructionEngine(
@@ -68,8 +68,6 @@ class ProjectRPCServer:
         self.rag_coordinator = rag_coordinator or RAGCoordinator(
             store=pm_store, project_manager=self.project_manager, upstream=upstream
         )
-        self.cowork_bridge = None
-        self.upstream = upstream
         self._handlers: dict[str, Callable[..., Awaitable[Any]]] = {
             "project.list": self._list,
             "project.create": self._create,

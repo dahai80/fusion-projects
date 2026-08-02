@@ -5,6 +5,7 @@ import pytest
 
 from project_service.daemon_server import ProjectRPCServer
 from project_service.engine.chat_manager import ChatManager
+from project_service.engine.gateway_client import GatewayClient
 from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.knowledge_manager import KnowledgeManager
 from project_service.engine.project_manager import ProjectManager
@@ -19,7 +20,7 @@ def rpc(tmp_path):
     cm = ChatManager(store=store, project_manager=pm)
     km = KnowledgeManager(store=store, project_manager=pm)
 
-    fake_upstream = AsyncMock()
+    fake_upstream = AsyncMock(spec=GatewayClient)
     fake_upstream.agent_list = AsyncMock(return_value=[
         {"id": "agent-1", "name": "Coder", "description": "code helper", "avatar": None},
     ])
@@ -27,8 +28,6 @@ def rpc(tmp_path):
         "id": "agent-1", "name": "Coder", "description": "code helper",
         "avatar": None, "tools": ["read"], "rag_enabled": True, "permissions": ["network"],
     })
-    fake_upstream.health_check_all = AsyncMock(return_value={"mlx": True})
-    fake_upstream.get_circuit_status = AsyncMock(return_value={})
 
     server = ProjectRPCServer(
         project_manager=pm,
@@ -41,7 +40,7 @@ def rpc(tmp_path):
     store.close()
 
 
-def _req(method: str, params: dict = None, req_id: int = 1) -> bytes:
+def _req(method: str, params: dict | None = None, req_id: int = 1) -> bytes:
     msg = {"jsonrpc": "2.0", "id": req_id, "method": method}
     if params:
         msg["params"] = params

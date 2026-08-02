@@ -9,11 +9,11 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.1.1 — Phase 1–3 (local + upstream) + architecture compliance P1-S2.**
+> **Status: v0.2.0 — Phase 1-3 (local + gateway) + architecture compliance A1-S2.**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
-> Cowork/upstream routes removed (P1-S2 compliance). RAG chain verified E2E:
+> CircuitBreaker + cowork removed (P1-S1 compliance A). RAG chain verified E2E:
 > project-svc → fusion-rag → fusion-mlx with BGE-M3 embeddings (score ≥ 0.6).
 
 ## Layout
@@ -36,7 +36,7 @@ fusion-projects/
 │   │   ├── agent_binding.py     # AgentBinding/AgentMeta/AgentPreview/PromptMergeMode
 │   │   ├── artifact_ref.py      # ArtifactRef/ArtifactMigrateRequest
 │   │   ├── audit.py             # AuditLogEntry
-│   │   └── cowork.py            # CoworkTask/CoworkTrigger
+│   └── (removed — cowork migrated to fusion-cowork)
 │   ├── store/
 │   │   ├── project_store.py     # raw sqlite3 ProjectStore (15 tables, no ORM)
 │   │   └── file_store.py        # per-project storage dirs
@@ -47,8 +47,8 @@ fusion-projects/
 │   │   ├── knowledge_manager.py # async KnowledgeManager + file upload/replace
 │   │   ├── agent_binder.py      # async AgentBinder + upstream agent resolution
 │   │   ├── rag_coordinator.py   # async RAGCoordinator (delegates to fusion-rag)
-│   │   ├── cowork_bridge.py     # async CoworkBridge (triggers automation tasks)
-│   │   └── upstream_client.py   # async UpstreamClient with circuit breaker
+│   │   ├── gateway_client.py     # lightweight GatewayClient (no circuit breaker)
+│   │   └── (removed — upstream_client migrated to gateway_client)
 │   └── api/
 │       ├── routes.py            # FastAPI /v1 router + MCP endpoint
 │       └── rest_server.py       # create_app() + uvicorn entry
@@ -263,7 +263,7 @@ MCP: `POST /mcp` (JSON-RPC 2.0 with tools/list, tools/call, initialize)
 | `FUSION_RAG_EMBEDDING_MODEL` | `BAAI--bge-m3` | embedding model ID for KB creation |
 | `FUSION_AGENT_STUDIO_URL` | `http://127.0.0.1:8000` | agent-studio URL |
 | `FUSION_GATEWAY_URL` | `http://127.0.0.1:8100` | fusion-gateway URL |
-| `FUSION_COWORK_SOCK` | `/tmp/fusion-cowork.sock` | cowork UDS socket |
+| `FUSION_GATEWAY_URL` | `http://127.0.0.1:11432` | fusion-gateway base URL
 
 ## RAG E2E chain
 
@@ -273,7 +273,7 @@ The project service integrates with fusion-rag (port 11436) and fusion-mlx (port
 ```
 project-svc (UDS RPC)
   → rag_coordinator.index_file() / .query()
-    → upstream_client.rag_upload_doc() / .rag_search()
+    → gateway_client.rag_upload_doc() / .rag_search()
       → fusion-rag /kb/bases/{kb_id}/documents (upload + embed)
         → fusion-mlx /v1/embeddings (BAAI--bge-m3, 1024-dim)
       → fusion-rag /kb/bases/{kb_id}/search (vector similarity)
@@ -302,7 +302,7 @@ project-svc (UDS RPC)
 SQLite tables: `projects`, `instructions`, `instruction_snapshots`,
 `project_artifacts`, `chats`, `chat_snapshots`, `messages`,
 `knowledge_folders`, `knowledge_files`, `chat_agent_bindings`, `rag_queries`,
-`temp_attachments`, `audit_log`, `cowork_tasks`. Dates are ISO-8601 UTC; IDs
+`temp_attachments`, `audit_log`,  Dates are ISO-8601 UTC; IDs
 are `uuid4().hex`. Foreign keys cascade on project delete.
 
 ## Business rules
@@ -322,7 +322,7 @@ are `uuid4().hex`. Foreign keys cascade on project delete.
 
 ```bash
 source .venv/bin/activate
-pytest -q          # 101 tests, no LLM/model loading
+pytest -q          # 94 tests, no LLM/model loading
 ```
 
 Coverage: `ProjectStore` CRUD/filters/cascade, `ProjectManager` lifecycle +
@@ -339,7 +339,6 @@ the real `~/.fusion-projects` is never touched.
 - Raw `sqlite3` with `sqlite3.Row` (no ORM), `@contextmanager` cursor with
   commit/rollback + `threading.RLock`.
 - UDS JSON-RPC daemon hand-rolled on `asyncio.start_unix_server` (no RPC library)
-  - mirrors `fusion-cowork` `DeskRPCServer`.
 - MCP server follows the 2024-11-05 protocol spec (initialize → tools/list →
   tools/call). Available via `POST /v1/mcp` (HTTP) or stdio (CLI).
 - `logger = logging.getLogger(__name__)` per module; `logging.basicConfig` only in

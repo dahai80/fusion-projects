@@ -1,8 +1,8 @@
 import logging
 from typing import Optional
 
+from project_service.engine.gateway_client import GatewayClient
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
-from project_service.engine.upstream_client import UpstreamClient
 from project_service.models.agent_binding import (
     AgentBinding,
     AgentMeta,
@@ -27,11 +27,11 @@ class AgentBinder:
         self,
         store: Optional[ProjectStore] = None,
         project_manager: Optional[ProjectManager] = None,
-        upstream: Optional[UpstreamClient] = None,
+        upstream: Optional[GatewayClient] = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.project_manager = project_manager or ProjectManager()
-        self.upstream = upstream or UpstreamClient()
+        self.upstream = upstream or GatewayClient()
 
     async def _ensure_project(self, project_id: str) -> None:
         row = self.store.get_project(project_id)

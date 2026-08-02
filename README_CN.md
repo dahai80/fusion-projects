@@ -4,8 +4,8 @@
 
 Fusion 生态的本地优先 AI **项目资产容器**服务。*项目（Project）* 是一个隔离的工作域，捆绑全局指令、持久化知识库（RAG）、隔离的聊天会话以及绑定的 Fusion Agent。本服务负责项目元数据、指令和存储布局，对外提供 UDS JSON-RPC 守护进程（供 Fusion 桌面端/Agent 调用）以及可选的 REST API。
 
-> **状态：v0.1.1 — Phase 1–3（本地 + 上游）+ 架构合规 P1-S2 整改。**
-> 完整的项目 CRUD、指令 + 快照、知识库文件夹/文件、聊天会话 + 分支 + 移动 + 解绑、Agent 绑定、RAG 索引 + 检索、审计日志、MCP 服务及完整项目导出均已实现且全量通过。协同/上游路由已移除（P1-S2 合规）。RAG 链路端到端验证通过：project-svc → fusion-rag → fusion-mlx，使用 BGE-M3 嵌入（score ≥ 0.6）。
+> **状态：v0.2.0 — Phase 1–3（本地 + 上游）+ 架构合规 P1-S1 整改。**
+> 完整的项目 CRUD、指令 + 快照、知识库文件夹/文件、聊天会话 + 分支 + 移动 + 解绑、Agent 绑定、RAG 索引 + 检索、审计日志、MCP 服务及完整项目导出均已实现且全量通过。CircuitBreaker + 协同桥接已移除，UpstreamClient 替换为 GatewayClient（P1-S1 合规）。RAG 链路端到端验证通过：project-svc → fusion-rag → fusion-mlx，使用 BGE-M3 嵌入（score ≥ 0.6）。
 
 ## 目录结构
 
@@ -27,7 +27,7 @@ fusion-projects/
 │   │   ├── agent_binding.py     # AgentBinding/AgentMeta/AgentPreview/PromptMergeMode
 │   │   ├── artifact_ref.py      # ArtifactRef/ArtifactMigrateRequest
 │   │   ├── audit.py             # AuditLogEntry
-│   │   └── cowork.py            # CoworkTask/CoworkTrigger
+│   │   └── cowork.py            # 已移除（P1-S1）
 │   ├── store/
 │   │   ├── project_store.py     # 原生 sqlite3 ProjectStore（15 张表，无 ORM）
 │   │   └── file_store.py        # 按项目隔离的存储目录
@@ -38,8 +38,7 @@ fusion-projects/
 │   │   ├── knowledge_manager.py # 异步 KnowledgeManager + 文件上传/替换
 │   │   ├── agent_binder.py      # 异步 AgentBinder + 上游 Agent 解析
 │   │   ├── rag_coordinator.py   # 异步 RAGCoordinator（委托 fusion-rag）
-│   │   ├── cowork_bridge.py     # 异步 CoworkBridge（触发自动化任务）
-│   │   └── upstream_client.py   # 异步 UpstreamClient 带熔断器
+│   │   └── gateway_client.py    # 异步 GatewayClient（无熔断器，委托网关路由）
 │   └── api/
 │       ├── routes.py            # FastAPI /v1 路由 + MCP 端点
 │       └── rest_server.py       # create_app() + uvicorn 入口
@@ -244,13 +243,10 @@ MCP：`POST /mcp`（JSON-RPC 2.0，支持 tools/list、tools/call、initialize�
 | `FUSION_PROJECT_HOST` | `127.0.0.1` | REST 主机 |
 | `FUSION_PROJECT_PORT` | `11440` | REST 端口 |
 | `FUSION_PROJECT_HOME` | `~/.fusion-projects` | 数据 + 存储根目录 |
-| `FUSION_MLX_URL` | `http://127.0.0.1:11434/v1` | fusion-mlx 基础 URL |
-| `FUSION_MLX_API_KEY` | `""` | fusion-mlx Bearer 令牌 |
 | `FUSION_RAG_URL` | `http://127.0.0.1:11436` | fusion-rag/kb 基础 URL |
 | `FUSION_RAG_EMBEDDING_MODEL` | `BAAI--bge-m3` | 知识库创建时使用的嵌入模型 ID |
 | `FUSION_AGENT_STUDIO_URL` | `http://127.0.0.1:8000` | agent-studio URL |
-| `FUSION_GATEWAY_URL` | `http://127.0.0.1:8100` | fusion-gateway URL |
-| `FUSION_COWORK_SOCK` | `/tmp/fusion-cowork.sock` | 协同 UDS 套接字 |
+| `FUSION_GATEWAY_URL` | `http://127.0.0.1:11432` | fusion-gateway URL |
 
 ## RAG 端到端链路
 
@@ -259,7 +255,7 @@ MCP：`POST /mcp`（JSON-RPC 2.0，支持 tools/list、tools/call、initialize�
 ```
 project-svc (UDS RPC)
   → rag_coordinator.index_file() / .query()
-    → upstream_client.rag_upload_doc() / .rag_search()
+    → gateway_client.rag_upload_doc() / .rag_search()
       → fusion-rag /kb/bases/{kb_id}/documents（上传 + 嵌入）
         → fusion-mlx /v1/embeddings（BAAI--bge-m3，1024 维）
       → fusion-rag /kb/bases/{kb_id}/search（向量相似度）
@@ -288,7 +284,7 @@ project-svc (UDS RPC)
 SQLite 表：`projects`、`instructions`、`instruction_snapshots`、
 `project_artifacts`、`chats`、`chat_snapshots`、`messages`、
 `knowledge_folders`、`knowledge_files`、`chat_agent_bindings`、`rag_queries`、
-`temp_attachments`、`audit_log`、`cowork_tasks`。日期为 ISO-8601 UTC；ID
+`temp_attachments`、`audit_log`。日期为 ISO-8601 UTC；ID
 为 `uuid4().hex`。删除项目时外键级联。
 
 ## 业务规则
@@ -300,21 +296,19 @@ SQLite 表：`projects`、`instructions`、`instruction_snapshots`、
 - **聊天 project_id 可空：** 聊天可从项目解绑（project_id=NULL）。
 - **完整项目导出：** 创建包含 project.json、instructions.json、
   聊天 + 消息、知识库文件夹/文件、Agent 绑定的 ZIP。
-- **协同桥接：** 触发自动化任务（pending → running → done/failed），
-  结果存储在 SQLite 中。
 
 ## 测试
 
 ```bash
 source .venv/bin/activate
-pytest -q          # 101 个测试，无需 LLM/模型加载
+pytest -q          # 94 个测试，无需 LLM/模型加载
 ```
 
 覆盖范围：`ProjectStore` CRUD/过滤/级联，`ProjectManager` 生命周期 +
 归档后删除 + 复制 + 导出，`InstructionEngine` 保存/快照/
 恢复/删除 + 长度校验，`ChatManager` 移动/解绑/临时附件，
 `KnowledgeManager` 文件夹/文件 CRUD + 上传/替换，`AgentBinder` 设置/
-获取/预览，`RAGCoordinator` 配置，`CoworkBridge` 触发/状态，`MCPServer`
+获取/预览，`RAGCoordinator` 配置，`GatewayClient` RAG/Agent 委托，`MCPServer`
 initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 `ProjectClient` 端到端测试，REST API 通过 `httpx.ASGITransport` 测试。
 所有测试使用 `tmp_path` — 不会影响真实的 `~/.fusion-projects`。
@@ -323,8 +317,7 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 - 原生 `sqlite3` 配合 `sqlite3.Row`（无 ORM），`@contextmanager` 游标
   带 commit/rollback + `threading.RLock`。
-- UDS JSON-RPC 守护进程基于 `asyncio.start_unix_server` 手写（无 RPC 库）
-  — 镜像 `fusion-cowork` 的 `DeskRPCServer`。
+- UDS JSON-RPC 守护进程基于 `asyncio.start_unix_server` 手写（无 RPC 库）。
 - MCP 服务遵循 2024-11-05 协议规范（initialize → tools/list →
   tools/call）。可通过 `POST /v1/mcp`（HTTP）或 stdio（CLI）使用。
 - 每个模块使用 `logger = logging.getLogger(__name__)`；`logging.basicConfig`
