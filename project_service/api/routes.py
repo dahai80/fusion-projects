@@ -61,7 +61,7 @@ from project_service.models.project import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1")
+router = APIRouter(prefix="/api/v1")
 
 
 def get_project_manager(request: Request) -> ProjectManager:

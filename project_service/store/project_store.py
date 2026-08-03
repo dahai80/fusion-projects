@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS instruction_snapshots (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     content TEXT NOT NULL,
-    label TEXT,
+    label TEXT NOT NULL DEFAULT 'auto',
     created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS chat_snapshots (
     id TEXT PRIMARY KEY,
     chat_id TEXT NOT NULL,
     title TEXT,
+    messages TEXT NOT NULL DEFAULT '[]',
+    instruction_snapshot_id TEXT,
     message_count INTEGER NOT NULL DEFAULT 0,
     agent_id TEXT,
     created_at TEXT NOT NULL,
@@ -195,21 +197,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_project ON audit_log(project_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at);
-
-CREATE TABLE IF NOT EXISTS cowork_tasks (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    action TEXT NOT NULL,
-    payload TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    result TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_cowork_project ON cowork_tasks(project_id);
-CREATE INDEX IF NOT EXISTS idx_cowork_status ON cowork_tasks(status);
 """
 
 ALLOWED_UPDATE_FIELDS = {
@@ -244,6 +231,7 @@ class ProjectStore:
             self._conn.executescript(SCHEMA_SQL)
             self._conn.commit()
             self._migrate_chat_project_id_nullable()
+            self._migrate_snapshots()
 
     def _migrate_chat_project_id_nullable(self) -> None:
         with self._lock:
@@ -273,6 +261,29 @@ class ProjectStore:
                     )
                     self._conn.commit()
                     break
+
+    def _migrate_snapshots(self) -> None:
+        with self._lock:
+            cur = self._conn.execute("PRAGMA table_info(instruction_snapshots)")
+            for col in cur.fetchall():
+                if col[1] == "label" and not col[3]:
+                    logger.info("migrating instruction_snapshots.label to NOT NULL DEFAULT 'auto'")
+                    self._conn.execute(
+                        "UPDATE instruction_snapshots SET label='auto' WHERE label IS NULL"
+                    )
+                    self._conn.commit()
+                    break
+            cur = self._conn.execute("PRAGMA table_info(chat_snapshots)")
+            col_names = {c[1] for c in cur.fetchall()}
+            if "messages" not in col_names:
+                logger.info("migrating chat_snapshots: add messages, instruction_snapshot_id")
+                self._conn.execute(
+                    "ALTER TABLE chat_snapshots ADD COLUMN messages TEXT NOT NULL DEFAULT '[]'"
+                )
+                self._conn.execute(
+                    "ALTER TABLE chat_snapshots ADD COLUMN instruction_snapshot_id TEXT"
+                )
+                self._conn.commit()
 
     @contextmanager
     def _cursor(self) -> Iterator[sqlite3.Cursor]:
@@ -726,6 +737,16 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM messages WHERE chat_id=?", (chat_id,))
             return cur.fetchone()[0]
+
+    def dump_chat_messages(self, chat_id: str) -> str:
+        import json
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT id, role, content, created_at FROM messages WHERE chat_id=? ORDER BY created_at ASC",
+                (chat_id,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        return json.dumps(rows, ensure_ascii=False)
 
     def delete_message(self, message_id: str) -> bool:
         with self._cursor() as cur:
