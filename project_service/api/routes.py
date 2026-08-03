@@ -7,6 +7,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from project_service.engine.agent_binder import AgentBinder
 from project_service.engine.chat_manager import ChatManager, ChatNotFound
+from project_service.engine.gateway_client import GatewayClient
 from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
@@ -86,6 +87,10 @@ def get_agent_binder(request: Request) -> AgentBinder:
 
 def get_rag_coordinator(request: Request) -> RAGCoordinator:
     return request.app.state.rag_coordinator
+
+
+def get_gateway_client(request: Request) -> GatewayClient:
+    return request.app.state.gateway_client
 
 
 # ── Project endpoints ──
@@ -575,13 +580,32 @@ async def stream_message(
     chat_id: str,
     payload: MessageCreate,
     cm: ChatManager = Depends(get_chat_manager),
+    gateway: GatewayClient = Depends(get_gateway_client),
 ):
     try:
-        msg = await cm.add_message(chat_id, payload)
+        await cm.add_message(chat_id, payload)
+        history = cm.store.list_messages(chat_id, limit=50)
+        llm_messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
         async def event_stream():
-            yield f"data: {json.dumps({'type': 'message', 'message': msg.model_dump()})}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            collected = []
+            try:
+                async for chunk in gateway.chat_completions_stream(llm_messages):
+                    if "error" in chunk:
+                        yield f"data: {json.dumps({'type': 'error', 'error': chunk})}\n\n"
+                        break
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    token = delta.get("content", "")
+                    if token:
+                        collected.append(token)
+                        yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+                assistant_content = "".join(collected)
+                if assistant_content:
+                    await cm.add_message(chat_id, MessageCreate(role="assistant", content=assistant_content))
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            except Exception as e:
+                logger.error("stream error: %s", e)
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
     except ChatNotFound:

@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any, Optional
 
@@ -116,7 +117,38 @@ class GatewayClient:
     async def agent_studio_is_healthy(self) -> bool:
         return await self._health_check(f"{self._agent_url}/health")
 
-    # ── Gateway ──
+    # ── Gateway (LLM inference) ──
+
+    async def chat_completions_stream(self, messages: list[dict], *, model: str = "", temperature: float = 0.7, max_tokens: int = 4096):
+        url = f"{self._gateway_url}/v1/chat/completions"
+        payload: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if model:
+            payload["model"] = model
+        try:
+            async with self._http.stream("POST", url, json=payload, timeout=120.0) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data.strip() == "[DONE]":
+                        return
+                    try:
+                        chunk = json.loads(data)
+                        yield chunk
+                    except json.JSONDecodeError:
+                        logger.warning("stream chunk parse error: %s", data[:120])
+        except httpx.HTTPStatusError as e:
+            logger.error("chat completions stream %d: %s", e.response.status_code, e)
+            yield {"error": "http_error", "status": e.response.status_code}
+        except httpx.RequestError as e:
+            logger.error("chat completions stream error: %s", e)
+            yield {"error": "request_error", "detail": str(e)}
 
     async def gateway_is_healthy(self) -> bool:
         return await self._health_check(f"{self._gateway_url}/health")
