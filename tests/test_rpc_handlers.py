@@ -329,18 +329,20 @@ async def test_mcp_parse_error():
 
 
 @pytest.mark.asyncio
-async def test_cowork_methods_removed(rpc):
+async def test_cowork_relay_methods_exist(rpc):
     resp = await rpc.handle_request(
         _req("cowork.trigger", {"project_id": "x", "action": "test"})
     )
     parsed = _parse(resp)
-    assert parsed["error"]["code"] == -32601
+    assert "result" in parsed
+    assert parsed["result"]["error"] == "cowork_unavailable"
 
     resp = await rpc.handle_request(
         _req("cowork.status", {"task_id": "nonexistent"})
     )
     parsed = _parse(resp)
-    assert parsed["error"]["code"] == -32601
+    assert "result" in parsed
+    assert parsed["result"]["error"] == "cowork_unavailable"
 
 
 @pytest.mark.asyncio
