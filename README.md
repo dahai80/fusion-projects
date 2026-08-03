@@ -9,7 +9,7 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.2.0 — Phase 1-3 (local + gateway) + architecture compliance A1-S2.**
+> **Status: v0.2.1 — Phase 1-3 (local + gateway) + architecture compliance A1-S2.**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
@@ -275,7 +275,7 @@ project-svc (UDS RPC)
   → rag_coordinator.index_file() / .query()
     → gateway_client.rag_upload_doc() / .rag_search()
       → fusion-rag /kb/bases/{kb_id}/documents (upload + embed)
-        → fusion-mlx /v1/embeddings (BAAI--bge-m3, 1024-dim)
+        → fusion-mlx /api/v1/embeddings (BAAI--bge-m3, 1024-dim)
       → fusion-rag /kb/bases/{kb_id}/search (vector similarity)
 ```
 
@@ -340,7 +340,7 @@ the real `~/.fusion-projects` is never touched.
   commit/rollback + `threading.RLock`.
 - UDS JSON-RPC daemon hand-rolled on `asyncio.start_unix_server` (no RPC library)
 - MCP server follows the 2024-11-05 protocol spec (initialize → tools/list →
-  tools/call). Available via `POST /v1/mcp` (HTTP) or stdio (CLI).
+  tools/call). Available via `POST /api/v1/mcp` (HTTP) or stdio (CLI).
 - `logger = logging.getLogger(__name__)` per module; `logging.basicConfig` only in
   entry points.
 - 4-space indentation, no docstrings.

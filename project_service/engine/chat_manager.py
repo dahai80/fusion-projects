@@ -121,12 +121,20 @@ class ChatManager:
         logger.info("chat forked from=%s to=%s snapshot=%s", chat_id, row["id"], snapshot.id)
         return Chat.from_row(row)
 
-    async def create_snapshot(self, chat_id: str, label: Optional[str] = None) -> ChatSnapshot:
+    async def create_snapshot(
+        self,
+        chat_id: str,
+        label: Optional[str] = None,
+        instruction_snapshot_id: Optional[str] = None,
+    ) -> ChatSnapshot:
         chat = await self.get_chat(chat_id)
         msg_count = self.store.count_messages(chat_id)
+        messages_json = self.store.dump_chat_messages(chat_id)
         data = {
             "chat_id": chat_id,
             "title": label or chat.title,
+            "messages": messages_json,
+            "instruction_snapshot_id": instruction_snapshot_id,
             "message_count": msg_count,
             "agent_id": chat.agent_id,
         }

@@ -64,6 +64,8 @@ class ChatSnapshot(BaseModel):
     id: str
     chat_id: str
     title: Optional[str] = None
+    messages: str = "[]"
+    instruction_snapshot_id: Optional[str] = None
     message_count: int = 0
     agent_id: Optional[str] = None
     created_at: str
@@ -74,6 +76,8 @@ class ChatSnapshot(BaseModel):
             id=row["id"],
             chat_id=row["chat_id"],
             title=row["title"],
+            messages=row.get("messages", "[]"),
+            instruction_snapshot_id=row.get("instruction_snapshot_id"),
             message_count=row["message_count"],
             agent_id=row["agent_id"],
             created_at=row["created_at"],
