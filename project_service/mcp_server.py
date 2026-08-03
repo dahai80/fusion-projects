@@ -89,6 +89,30 @@ MCP_TOOLS = [
             "required": ["chat_id"],
         },
     },
+    {
+        "name": "project_get_chat",
+        "description": "Get chat details",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "string"},
+            },
+            "required": ["chat_id"],
+        },
+    },
+    {
+        "name": "project_send_message",
+        "description": "Send a message in a chat",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chat_id": {"type": "string"},
+                "content": {"type": "string"},
+                "role": {"type": "string", "default": "user"},
+            },
+            "required": ["chat_id", "content"],
+        },
+    },
 ]
 
 
@@ -103,6 +127,8 @@ class MCPServer:
             "project_get_instructions": self._tool_get_instructions,
             "project_list_chats": self._tool_list_chats,
             "project_get_chat_messages": self._tool_get_chat_messages,
+            "project_get_chat": self._tool_get_chat,
+            "project_send_message": self._tool_send_message,
         }
 
     async def _tool_project_list(self, args: dict) -> list[dict]:
@@ -126,6 +152,13 @@ class MCPServer:
     async def _tool_get_chat_messages(self, args: dict) -> dict:
         params = {"chat_id": args["chat_id"], "limit": args.get("limit", 50), "offset": 0}
         return await self.rpc.dispatch("project.chat.message.list", params)
+
+    async def _tool_get_chat(self, args: dict) -> dict:
+        return await self.rpc.dispatch("project.chat.get", args)
+
+    async def _tool_send_message(self, args: dict) -> dict:
+        params = {"chat_id": args["chat_id"], "content": args["content"], "role": args.get("role", "user")}
+        return await self.rpc.dispatch("project.chat.message.add", params)
 
     async def handle_request(self, raw: bytes) -> bytes:
         try:

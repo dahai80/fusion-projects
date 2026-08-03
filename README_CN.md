@@ -4,7 +4,7 @@
 
 Fusion 生态的本地优先 AI **项目资产容器**服务。*项目（Project）* 是一个隔离的工作域，捆绑全局指令、持久化知识库（RAG）、隔离的聊天会话以及绑定的 Fusion Agent。本服务负责项目元数据、指令和存储布局，对外提供 UDS JSON-RPC 守护进程（供 Fusion 桌面端/Agent 调用）以及可选的 REST API。
 
-> **状态：v0.2.2 — Phase 1–3（本地 + 上游）+ 架构合规 P1-S1 整改。**
+> **状态：v0.2.3 — Phase 1–3（本地 + 上游）+ 架构合规 P1-S1 整改。**
 > 完整的项目 CRUD、指令 + 快照、知识库文件夹/文件、聊天会话 + 分支 + 移动 + 解绑、Agent 绑定、RAG 索引 + 检索、审计日志、MCP 服务及完整项目导出均已实现且全量通过。CircuitBreaker + 协同桥接已移除，UpstreamClient 替换为 GatewayClient（P1-S1 合规）。RAG 链路端到端验证通过：project-svc → fusion-rag → fusion-mlx，使用 BGE-M3 嵌入（score ≥ 0.6）。
 
 ## 目录结构

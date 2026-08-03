@@ -51,6 +51,7 @@ class ProjectRPCServer:
     ) -> None:
         store = ProjectStore()
         upstream = upstream or GatewayClient()
+        self.gateway_client = upstream
         self.project_manager = project_manager or ProjectManager(store=store)
         pm_store = getattr(self.project_manager, "store", store)
         self.instruction_engine = instruction_engine or InstructionEngine(
@@ -136,8 +137,6 @@ class ProjectRPCServer:
             "project.rag.config.set": self._rag_config_set,
             "project.upstream.health": self._upstream_health,
             "project.upstream.circuits": self._upstream_circuits,
-            "cowork.trigger": self._cowork_trigger,
-            "cowork.status": self._cowork_status,
             "project.export": self._export_project,
         }
 
@@ -548,7 +547,7 @@ class ProjectRPCServer:
     # ── Upstream handlers ──
 
     async def _upstream_health(self, params: Any) -> dict:
-        gw = self.agent_binder._upstream
+        gw = self.gateway_client
         return {
             "gateway": await gw.gateway_is_healthy(),
             "rag": await gw.rag_is_healthy(),
@@ -556,7 +555,7 @@ class ProjectRPCServer:
         }
 
     async def _upstream_circuits(self, params: Any) -> dict:
-        gw = self.agent_binder._upstream
+        gw = self.gateway_client
         return {
             "services": {
                 "gateway": {"url": gw._gateway_url, "healthy": await gw.gateway_is_healthy()},
@@ -564,39 +563,6 @@ class ProjectRPCServer:
                 "agent_studio": {"url": gw._agent_url, "healthy": await gw.agent_studio_is_healthy()},
             }
         }
-
-    # ── Cowork relay handlers ──
-
-    async def _cowork_relay(self, method: str, params: dict) -> dict:
-        sock_path = "/tmp/fusion-cowork.sock"
-        import asyncio as _asyncio
-        try:
-            reader, writer = await _asyncio.open_unix_connection(sock_path)
-        except Exception as e:
-            logger.error("cowork relay connect failed: %s", e)
-            return {"error": "cowork_unavailable", "detail": str(e)}
-        req = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        try:
-            writer.write((json.dumps(req) + "\n").encode())
-            await writer.drain()
-            line = await asyncio.wait_for(reader.readline(), timeout=30.0)
-            resp = json.loads(line.decode())
-            return resp.get("result", resp.get("error", {"error": "empty_response"}))
-        except Exception as e:
-            logger.error("cowork relay call failed method=%s: %s", method, e)
-            return {"error": "cowork_relay_error", "detail": str(e)}
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-
-    async def _cowork_trigger(self, params: Any) -> dict:
-        return await self._cowork_relay("cowork.trigger", params or {})
-
-    async def _cowork_status(self, params: Any) -> dict:
-        return await self._cowork_relay("cowork.status", params or {})
 
     # ── Export handler ──
 
