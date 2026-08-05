@@ -15,13 +15,20 @@ class GatewayClient:
         self._gateway_url = config.GATEWAY_URL
         self._rag_url = config.RAG_BASE_URL
         self._agent_url = config.AGENT_STUDIO_URL
+        self._api_key = config.GATEWAY_API_KEY
         self._http = httpx.AsyncClient(timeout=timeout)
-        logger.info("GatewayClient ready gateway=%s rag=%s agent=%s",
-                     self._gateway_url, self._rag_url, self._agent_url)
+        logger.info("GatewayClient ready gateway=%s rag=%s agent=%s auth=%s",
+                     self._gateway_url, self._rag_url, self._agent_url,
+                     "on" if self._api_key else "off")
 
     async def close(self) -> None:
         await self._http.aclose()
         logger.info("GatewayClient closed")
+
+    def _auth_headers(self) -> dict:
+        if self._api_key:
+            return {"Authorization": f"Bearer {self._api_key}"}
+        return {}
 
     async def _request(
         self,
@@ -36,6 +43,7 @@ class GatewayClient:
         try:
             resp = await self._http.request(
                 method, url, json=json_data, params=params,
+                headers=self._auth_headers(),
             )
             resp.raise_for_status()
             return resp.json()
@@ -130,7 +138,7 @@ class GatewayClient:
         if model:
             payload["model"] = model
         try:
-            async with self._http.stream("POST", url, json=payload, timeout=120.0) as resp:
+            async with self._http.stream("POST", url, json=payload, timeout=120.0, headers=self._auth_headers()) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data: "):

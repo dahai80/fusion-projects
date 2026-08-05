@@ -18,6 +18,7 @@ RAG_BASE_URL = os.environ.get("FUSION_RAG_URL", "http://127.0.0.1:11436")
 RAG_EMBEDDING_MODEL = os.environ.get("FUSION_RAG_EMBEDDING_MODEL", "BAAI--bge-m3")
 AGENT_STUDIO_URL = os.environ.get("FUSION_AGENT_STUDIO_URL", "http://127.0.0.1:8000")
 GATEWAY_URL = os.environ.get("FUSION_GATEWAY_URL", "http://127.0.0.1:11432")
+GATEWAY_API_KEY = os.environ.get("FUSION_GATEWAY_API_KEY", "") or os.environ.get("FUSION_MLX_API_KEY", "")
 
 DEFAULT_RAG_MODE = "AUTO"
 DEFAULT_RAG_TOP_K = 5
