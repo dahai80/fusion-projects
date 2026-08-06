@@ -18,7 +18,7 @@ def create_app(
     project_manager: Optional[ProjectManager] = None,
     instruction_engine: Optional[InstructionEngine] = None,
 ) -> FastAPI:
-    app = FastAPI(title="Fusion-Projects", version="0.2.5")
+    app = FastAPI(title="Fusion-Projects", version="0.2.6")
     app.state.project_manager = project_manager or ProjectManager()
     app.state.instruction_engine = instruction_engine or InstructionEngine(
         project_manager=app.state.project_manager

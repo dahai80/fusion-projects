@@ -33,6 +33,12 @@ from project_service.models.project import ProjectCreate, ProjectUpdate
 from project_service.models.audit import AuditLogEntry
 from project_service.store.project_store import ProjectStore
 
+try:
+    from importlib.metadata import version as _pkg_version
+    _VERSION = _pkg_version("fusion-projects")
+except Exception:
+    _VERSION = "0.0.0"
+
 logger = logging.getLogger(__name__)
 
 
@@ -140,6 +146,11 @@ class ProjectRPCServer:
             "cowork.trigger": self._cowork_trigger,
             "cowork.status": self._cowork_status,
             "project.export": self._export_project,
+            "ping": self._ping,
+            "rpc.list": self._rpc_list,
+            "rpc_methods": self._rpc_list,
+            "tools/list": self._tools_list,
+            "health": self._ping,
         }
 
     # ── Project handlers ──
@@ -319,6 +330,7 @@ class ProjectRPCServer:
     async def _msg_add(self, params: Any) -> dict:
         payload = MessageCreate(
             content=params["content"],
+            role=params.get("role", "user"),
             rag_mode=params.get("rag_mode"),
             rag_scope=params.get("rag_scope"),
             temp_file_ids=params.get("temp_file_ids"),
@@ -597,6 +609,20 @@ class ProjectRPCServer:
 
     async def _cowork_status(self, params: Any) -> dict:
         return await self._cowork_relay("cowork.status", params or {})
+
+    # ── Discovery & ping ──
+
+    async def _ping(self, params: Any) -> dict:
+        return {"pong": True, "service": "fusion-project-svc", "version": _VERSION}
+
+    async def _rpc_list(self, params: Any) -> dict:
+        return {"methods": sorted(self._handlers.keys())}
+
+    async def _tools_list(self, params: Any) -> dict:
+        tools = []
+        for method in sorted(self._handlers.keys()):
+            tools.append({"name": method, "description": method})
+        return {"tools": tools}
 
     # ── Export handler ──
 
