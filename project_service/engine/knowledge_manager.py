@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
+from project_service import config
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
 from project_service.models.knowledge import (
     FileIndexStatus,
@@ -27,6 +28,41 @@ class FolderNotFound(KnowledgeError):
 
 class KnowledgeFileNotFound(KnowledgeError):
     pass
+
+
+_SENSITIVE_DIRS = ("/etc", "/private/etc", "/System", "/usr")
+_SENSITIVE_NAMES = (".ssh", "secret.key", ".env", ".aws", ".gnupg")
+
+
+def _is_under(path: Path, base: str) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_source(source_path: str) -> Path:
+    src = Path(source_path).resolve()
+    if not src.exists():
+        raise KnowledgeError(f"source file not found: {source_path}")
+    if src.is_dir():
+        raise KnowledgeError(f"source path is a directory: {source_path}")
+    for sensitive in _SENSITIVE_DIRS:
+        if _is_under(src, sensitive):
+            logger.warning("rejected sensitive source path: %s", source_path)
+            raise KnowledgeError("source path is in a restricted system directory")
+    name_lower = src.name.lower()
+    for bad in _SENSITIVE_NAMES:
+        if bad in name_lower or bad in str(src).lower():
+            logger.warning("rejected sensitive source name: %s", source_path)
+            raise KnowledgeError("source path references a restricted file")
+    size = src.stat().st_size
+    if size > config.KNOWLEDGE_MAX_FILE_BYTES:
+        raise KnowledgeError(
+            f"source file too large: {size} bytes (limit {config.KNOWLEDGE_MAX_FILE_BYTES})"
+        )
+    return src
 
 
 class KnowledgeManager:
@@ -166,9 +202,7 @@ class KnowledgeManager:
         mime_type: Optional[str] = None,
     ) -> KnowledgeFile:
         await self._ensure_project(project_id)
-        src = Path(source_path)
-        if not src.exists():
-            raise KnowledgeError(f"source file not found: {source_path}")
+        src = _validate_source(source_path)
         dest_dir = self.file_store.project_dir(project_id) / "knowledge"
         if folder_id:
             folder = self.store.get_folder(folder_id)
@@ -204,9 +238,7 @@ class KnowledgeManager:
         existing = self.store.get_knowledge_file(file_id)
         if not existing:
             raise KnowledgeFileNotFound(file_id)
-        src = Path(source_path)
-        if not src.exists():
-            raise KnowledgeError(f"source file not found: {source_path}")
+        src = _validate_source(source_path)
         old_path = Path(existing["file_path"])
         if old_path.exists():
             old_path.unlink()

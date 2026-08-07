@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import uvicorn
@@ -6,6 +7,11 @@ from fastapi import FastAPI
 
 from project_service import config
 from project_service.api.routes import router
+from project_service.api.security import (
+    AuthMiddleware,
+    BodySizeMiddleware,
+    RateLimitMiddleware,
+)
 from project_service.engine.gateway_client import GatewayClient
 from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.project_manager import ProjectManager
@@ -18,18 +24,33 @@ def create_app(
     project_manager: Optional[ProjectManager] = None,
     instruction_engine: Optional[InstructionEngine] = None,
 ) -> FastAPI:
-    app = FastAPI(title="Fusion-Projects", version="0.2.7")
+    gateway_client = GatewayClient()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        logger.info("rest lifespan startup auth=%s", "on" if config.REST_API_KEY else "off")
+        yield
+        logger.info("rest lifespan shutdown: closing gateway client")
+        try:
+            await gateway_client.close()
+        except Exception as e:
+            logger.error("gateway client close failed: %s", e)
+
+    app = FastAPI(title="Fusion-Projects", version="0.3.0", lifespan=lifespan)
     app.state.project_manager = project_manager or ProjectManager()
     app.state.instruction_engine = instruction_engine or InstructionEngine(
         project_manager=app.state.project_manager
     )
     app.state.mcp_server = MCPServer()
-    app.state.gateway_client = GatewayClient()
+    app.state.gateway_client = gateway_client
+    app.add_middleware(AuthMiddleware)
+    app.add_middleware(BodySizeMiddleware)
+    app.add_middleware(RateLimitMiddleware)
     app.include_router(router)
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "service": "fusion-project-svc"}
+        return {"status": "ok", "service": "fusion-project-svc", "auth": "on" if config.REST_API_KEY else "off"}
 
     logger.info("FastAPI app created")
     return app

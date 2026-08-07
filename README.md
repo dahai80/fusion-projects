@@ -9,7 +9,7 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.2.7 — Phase 1-3 (local + gateway) + architecture compliance A1-S2.**
+> **Status: v0.3.0 — production-hardened for public/internet deployment.**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
@@ -17,7 +17,11 @@ optional REST API.
 > project-svc → fusion-rag → fusion-mlx with BGE-M3 embeddings (score ≥ 0.6).
 > Core-feature acceptance: 75 RPC methods (incl. ping/rpc.list/tools/list
 > discovery), 9 MCP tools, 65 REST routes with SSE streaming, 13 SQLite tables
-> with FK cascade, 96 tests passing.
+> with FK cascade, 107 tests passing.
+> **Production hardening (v0.3.0):** REST Bearer/x-api-key auth (public paths
+> exempt), per-IP rate limiting, request body size cap, SQLite WAL + busy_timeout,
+> UDS socket 0o600, graceful SIGTERM shutdown with client cleanup, secret-file
+> key loading, knowledge upload path-traversal + size guards.
 
 ## Layout
 

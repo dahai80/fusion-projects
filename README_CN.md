@@ -4,9 +4,10 @@
 
 Fusion 生态的本地优先 AI **项目资产容器**服务。*项目（Project）* 是一个隔离的工作域，捆绑全局指令、持久化知识库（RAG）、隔离的聊天会话以及绑定的 Fusion Agent。本服务负责项目元数据、指令和存储布局，对外提供 UDS JSON-RPC 守护进程（供 Fusion 桌面端/Agent 调用）以及可选的 REST API。
 
-> **状态：v0.2.7 — Phase 1–3（本地 + 上游）+ 架构合规 P1-S1 整改。**
+> **状态：v0.3.0 — 公网/互联网部署的生产加固版。**
 > 完整的项目 CRUD、指令 + 快照、知识库文件夹/文件、聊天会话 + 分支 + 移动 + 解绑、Agent 绑定、RAG 索引 + 检索、审计日志、MCP 服务及完整项目导出均已实现且全量通过。CircuitBreaker + 协同桥接已移除，UpstreamClient 替换为 GatewayClient（P1-S1 合规）。RAG 链路端到端验证通过：project-svc → fusion-rag → fusion-mlx，使用 BGE-M3 嵌入（score ≥ 0.6）。
-> 核心特性验收：75 个 RPC 方法（含 ping/rpc.list/tools/list 发现）、9 个 MCP 工具、65 条 REST 路由含 SSE 流式、13 张 SQLite 表带外键级联、96 个测试全通过。
+> 核心特性验收：75 个 RPC 方法（含 ping/rpc.list/tools/list 发现）、9 个 MCP 工具、65 条 REST 路由含 SSE 流式、13 张 SQLite 表带外键级联、107 个测试全通过。
+> **生产加固（v0.3.0）：** REST Bearer/x-api-key 鉴权（公共路径豁免）、按 IP 限流、请求体大小上限、SQLite WAL + busy_timeout、UDS socket 0o600、SIGTERM 优雅关闭并清理客户端连接、密钥文件加载、知识库上传路径遍历 + 体积防护。
 
 ## 目录结构
 

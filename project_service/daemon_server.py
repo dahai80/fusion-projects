@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from typing import Any, Awaitable, Callable, Optional
 
 from pydantic import ValidationError
@@ -714,10 +715,37 @@ class ProjectRPCServer:
         if os.path.exists(sock_path):
             os.remove(sock_path)
         server = await asyncio.start_unix_server(self._client_cb, path=sock_path)
-        os.chmod(sock_path, 0o666)
-        logger.info("ProjectRPCServer listening on %s", sock_path)
+        os.chmod(sock_path, config.SOCKET_MODE)
+        logger.info("ProjectRPCServer listening on %s mode=%o", sock_path, config.SOCKET_MODE)
+
+        stop_event = asyncio.Event()
+
+        def _request_stop() -> None:
+            logger.info("shutdown signal received")
+            stop_event.set()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, _request_stop)
+            except NotImplementedError:
+                pass
+
         async with server:
-            await server.serve_forever()
+            serve_task = asyncio.ensure_future(server.serve_forever())
+            stop_task = asyncio.ensure_future(stop_event.wait())
+            done, pending = await asyncio.wait(
+                {serve_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+            server.close()
+            await server.wait_closed()
+            try:
+                await self.gateway_client.close()
+            except Exception as e:
+                logger.error("gateway client close failed: %s", e)
+            logger.info("ProjectRPCServer stopped cleanly")
 
 
 def _result(req_id: Any, result: Any) -> bytes:
