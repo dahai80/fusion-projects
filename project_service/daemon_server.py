@@ -34,8 +34,11 @@ from project_service.models.audit import AuditLogEntry
 from project_service.store.project_store import ProjectStore
 
 try:
-    from importlib.metadata import version as _pkg_version
-    _VERSION = _pkg_version("fusion-projects")
+    from importlib.metadata import version as _pkg_version, PackageNotFoundError
+    try:
+        _VERSION = _pkg_version("fusion-project-svc")
+    except PackageNotFoundError:
+        _VERSION = _pkg_version("fusion-projects")
 except Exception:
     _VERSION = "0.0.0"
 
