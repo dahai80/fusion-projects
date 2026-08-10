@@ -38,6 +38,9 @@ logs/
 *.db
 *.sqlite3
 
+# Runtime
+.fusion-project-svc.pid
+
 # OS
 .DS_Store
 Thumbs.db
