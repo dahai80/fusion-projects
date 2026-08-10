@@ -1,6 +1,6 @@
 [project]
 name = "fusion-project-svc"
-version = "0.3.0"
+version = "0.3.1"
 description = "Fusion-Projects - local-first AI project asset container service"
 requires-python = ">=3.11"
 dependencies = [

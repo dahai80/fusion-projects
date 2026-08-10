@@ -9,7 +9,7 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.3.0 — production-hardened for public/internet deployment.**
+> **Status: v0.3.1 — production-hardened for public/internet deployment.**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
@@ -22,6 +22,9 @@ optional REST API.
 > exempt), per-IP rate limiting, request body size cap, SQLite WAL + busy_timeout,
 > UDS socket 0o600, graceful SIGTERM shutdown with client cleanup, secret-file
 > key loading, knowledge upload path-traversal + size guards.
+> **v0.3.1 patch:** AGENT_STUDIO_URL default 8000→11455 aligned with the fusion
+> 114xx port convention (fixes agent binding connectivity, #22); douyin e-commerce
+> AgentGraph now fetches product main images + real CDP publish (#23).
 
 ## Layout
 
