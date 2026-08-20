@@ -102,13 +102,15 @@ MCP_TOOLS = [
     },
     {
         "name": "project_send_message",
-        "description": "Send a message in a chat",
+        "description": "Send a message in a chat and get the assistant reply (auto-applies project instructions + knowledge base)",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "chat_id": {"type": "string"},
                 "content": {"type": "string"},
                 "role": {"type": "string", "default": "user"},
+                "rag_mode": {"type": "string", "enum": ["AUTO", "MANUAL", "OFF"], "default": "AUTO"},
+                "rag_scope": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["chat_id", "content"],
         },
@@ -157,8 +159,14 @@ class MCPServer:
         return await self.rpc.dispatch("project.chat.get", args)
 
     async def _tool_send_message(self, args: dict) -> dict:
-        params = {"chat_id": args["chat_id"], "content": args["content"], "role": args.get("role", "user")}
-        return await self.rpc.dispatch("project.chat.message.add", params)
+        params = {
+            "chat_id": args["chat_id"],
+            "content": args["content"],
+            "role": args.get("role", "user"),
+            "rag_mode": args.get("rag_mode"),
+            "rag_scope": args.get("rag_scope"),
+        }
+        return await self.rpc.dispatch("project.chat.message.stream", params)
 
     async def handle_request(self, raw: bytes) -> bytes:
         try:

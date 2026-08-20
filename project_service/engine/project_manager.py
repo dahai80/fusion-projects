@@ -1,11 +1,13 @@
 import io
 import json
 import logging
+import shutil
+import uuid
 import zipfile
-from typing import Optional
+from pathlib import Path
+from typing import Optional, TYPE_CHECKING
 
-import httpx
-
+from project_service.engine.gateway_client import GatewayClient
 from project_service.models.artifact_ref import ArtifactRef
 from project_service.models.project import (
     Project,
@@ -16,9 +18,10 @@ from project_service.models.project import (
 from project_service.store.file_store import FileStore
 from project_service.store.project_store import ProjectStore
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from project_service.engine.rag_coordinator import RAGCoordinator
 
-ARTIFACTS_ENGINE_URL = "http://127.0.0.1:8892"
+logger = logging.getLogger(__name__)
 
 _TYPE_EXTENSIONS = {
     "html": ".html",
@@ -58,14 +61,18 @@ class ProjectManager:
         self,
         store: Optional[ProjectStore] = None,
         file_store: Optional[FileStore] = None,
+        upstream: Optional[GatewayClient] = None,
+        rag_coordinator: Optional["RAGCoordinator"] = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.file_store = file_store or FileStore()
+        self.upstream = upstream or GatewayClient()
+        self.rag_coordinator = rag_coordinator
 
     async def create(self, payload: ProjectCreate) -> Project:
         data = payload.model_dump()
         instructions_text = data.pop("instructions", None)
-        data.pop("template_id", None)
+        template_id = data.pop("template_id", None)
         row = self.store.create_project(data)
         self.file_store.init_project(row["id"])
         if instructions_text:
@@ -73,6 +80,13 @@ class ProjectManager:
             logger.info("project created with instructions id=%s len=%d", row["id"], len(instructions_text))
         else:
             logger.info("project created id=%s name=%s", row["id"], row["name"])
+        if template_id:
+            try:
+                source = await self.get(template_id)
+                await self._copy_project_content(source, row["id"], copy_instructions=True, copy_chats=False)
+                logger.info("project templated from=%s to=%s", template_id, row["id"])
+            except Exception as e:
+                logger.warning("template copy failed from=%s to=%s err=%s (project kept)", template_id, row["id"], e)
         return Project.from_row(self.store.get_project(row["id"]))
 
     async def get(self, project_id: str) -> Project:
@@ -140,19 +154,10 @@ class ProjectManager:
         logger.info("project deleted id=%s artifacts_cleared=%d", project_id, len(artifact_rows))
 
     async def _call_artifacts_engine(self, method: str, params: dict) -> dict:
-        payload = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-            "id": 1,
-        }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(ARTIFACTS_ENGINE_URL, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-        if "error" in data:
-            raise ProjectError(f"artifacts-engine error: {data['error']}")
-        return data.get("result", {})
+        result = await self.upstream.artifacts_call(method, params)
+        if not isinstance(result, dict) or "error" in result:
+            raise ProjectError(f"artifacts-engine error: {result}")
+        return result
 
     async def migrate_artifact(
         self,
@@ -271,7 +276,12 @@ class ProjectManager:
             logger.info("artifact ref removed artifact=%s", artifact_id)
         return removed
 
-    async def duplicate_project(self, project_id: str, name: Optional[str] = None) -> Project:
+    async def duplicate_project(
+        self,
+        project_id: str,
+        name: Optional[str] = None,
+        copy_chats: bool = False,
+    ) -> Project:
         source = await self.get(project_id)
         new_name = name or f"{source.name} (copy)"
         payload = ProjectCreate(
@@ -284,15 +294,89 @@ class ProjectManager:
             rag_threshold=source.rag_threshold,
         )
         new_proj = await self.create(payload)
-        instr = self.store.get_instructions(project_id)
-        if instr and instr["content"]:
-            self.store.save_instructions(new_proj.id, instr["content"])
-        bindings = self.store.get_binding_by_project(project_id)
+        await self._copy_project_content(
+            source, new_proj.id, copy_instructions=True, copy_chats=copy_chats
+        )
+        logger.info("project duplicated from=%s to=%s chats=%s", project_id, new_proj.id, copy_chats)
+        return new_proj
+
+    async def _copy_project_content(
+        self,
+        source: Project,
+        dest_id: str,
+        copy_instructions: bool = True,
+        copy_chats: bool = False,
+    ) -> None:
+        source_id = source.id
+        if copy_instructions:
+            instr = self.store.get_instructions(source_id)
+            if instr and instr.get("content"):
+                self.store.save_instructions(dest_id, instr["content"])
+        bindings = self.store.get_binding_by_project(source_id)
         if bindings:
             self.store.create_binding({
-                "project_id": new_proj.id,
+                "project_id": dest_id,
                 "agent_id": bindings["agent_id"],
                 "merge_mode": bindings["merge_mode"],
             })
-        logger.info("project duplicated from=%s to=%s", project_id, new_proj.id)
-        return new_proj
+        folders = self.store.list_folders(source_id)
+        folder_id_map: dict[Optional[str], Optional[str]] = {}
+        for f in folders:
+            new_folder = self.store.create_folder({
+                "project_id": dest_id,
+                "name": f["name"],
+                "parent_id": folder_id_map.get(f["parent_id"]),
+                "sort_order": f.get("sort_order", 0),
+            })
+            folder_id_map[f["id"]] = new_folder["id"]
+        files = self.store.list_knowledge_files(source_id)
+        for kfile in files:
+            old_path = Path(kfile["file_path"])
+            folder_id = folder_id_map.get(kfile["folder_id"])
+            dest_dir = self.file_store.project_dir(dest_id) / "knowledge"
+            if folder_id:
+                dest_dir = dest_dir / folder_id
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_name = kfile["original_name"] or old_path.name
+            dest_path = dest_dir / dest_name
+            if dest_path.exists():
+                dest_path = dest_dir / f"{dest_path.stem}_{uuid.uuid4().hex[:8]}{dest_path.suffix}"
+            if old_path.exists():
+                shutil.copy2(str(old_path), str(dest_path))
+            new_file = self.store.create_knowledge_file({
+                "project_id": dest_id,
+                "folder_id": folder_id,
+                "name": dest_path.stem,
+                "original_name": dest_name,
+                "file_path": str(dest_path),
+                "file_size": kfile.get("file_size", 0),
+                "mime_type": kfile.get("mime_type"),
+                "index_status": "PENDING",
+            })
+            if self.rag_coordinator is not None and old_path.exists():
+                try:
+                    await self.rag_coordinator.index_file(new_file["id"])
+                except Exception as e:
+                    logger.warning("re-index failed file=%s dest=%s err=%s (left PENDING)", new_file["id"], dest_id, e)
+        if copy_chats:
+            chats = self.store.list_chats(source_id)
+            for c in chats:
+                new_chat = self.store.create_chat({
+                    "project_id": dest_id,
+                    "title": c["title"],
+                    "agent_id": c.get("agent_id"),
+                })
+                msgs = self.store.list_messages(c["id"])
+                for m in msgs:
+                    self.store.create_message({
+                        "chat_id": new_chat["id"],
+                        "role": m["role"],
+                        "content": m["content"],
+                        "rag_sources": m.get("rag_sources"),
+                        "tool_calls": m.get("tool_calls"),
+                        "token_usage": m.get("token_usage"),
+                    })
+        logger.info(
+            "content copied from=%s to=%s folders=%d files=%d chats=%s",
+            source_id, dest_id, len(folders), len(files), copy_chats,
+        )

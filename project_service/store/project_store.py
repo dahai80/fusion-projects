@@ -727,12 +727,21 @@ class ProjectStore:
             r = cur.fetchone()
         return dict(r) if r else None
 
-    def list_messages(self, chat_id: str, limit: int = 100, offset: int = 0) -> list[dict]:
+    def list_messages(self, chat_id: str, limit: int = 100, offset: int = 0, keep_recent: bool = False) -> list[dict]:
         with self._cursor() as cur:
-            cur.execute(
-                "SELECT * FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
-                (chat_id, limit, offset),
-            )
+            if keep_recent:
+                # keep only the most-recent `limit` messages, then re-order ASC so the
+                # caller (LLM history feed) gets chronological order with the newest tail.
+                cur.execute(
+                    "SELECT * FROM (SELECT * FROM messages WHERE chat_id=? "
+                    "ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
+                    (chat_id, limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+                    (chat_id, limit, offset),
+                )
             return [dict(r) for r in cur.fetchall()]
 
     def count_messages(self, chat_id: str) -> int:

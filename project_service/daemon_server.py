@@ -62,7 +62,7 @@ class ProjectRPCServer:
         store = ProjectStore()
         upstream = upstream or GatewayClient()
         self.gateway_client = upstream
-        self.project_manager = project_manager or ProjectManager(store=store)
+        self.project_manager = project_manager or ProjectManager(store=store, upstream=upstream)
         pm_store = getattr(self.project_manager, "store", store)
         self.instruction_engine = instruction_engine or InstructionEngine(
             store=pm_store, project_manager=self.project_manager
@@ -70,14 +70,15 @@ class ProjectRPCServer:
         self.chat_manager = chat_manager or ChatManager(
             store=pm_store, project_manager=self.project_manager
         )
-        self.knowledge_manager = knowledge_manager or KnowledgeManager(
-            store=pm_store, project_manager=self.project_manager
-        )
         self.agent_binder = agent_binder or AgentBinder(
             store=pm_store, project_manager=self.project_manager, upstream=upstream
         )
         self.rag_coordinator = rag_coordinator or RAGCoordinator(
             store=pm_store, project_manager=self.project_manager, upstream=upstream
+        )
+        self.project_manager.rag_coordinator = self.rag_coordinator
+        self.knowledge_manager = knowledge_manager or KnowledgeManager(
+            store=pm_store, project_manager=self.project_manager, rag_coordinator=self.rag_coordinator
         )
         self._handlers: dict[str, Callable[..., Awaitable[Any]]] = {
             "project.list": self._list,
@@ -113,6 +114,7 @@ class ProjectRPCServer:
             "project.chat.snapshot.delete": self._chat_snap_delete,
             "project.chat.message.list": self._msg_list,
             "project.chat.message.add": self._msg_add,
+            "project.chat.message.stream": self._msg_stream,
             "project.chat.message.delete": self._msg_delete,
             "project.chat.temp_attachment.add": self._temp_attach_add,
             "project.chat.temp_attachment.list": self._temp_attach_list,
@@ -341,6 +343,80 @@ class ProjectRPCServer:
         )
         msg = await self.chat_manager.add_message(params["chat_id"], payload)
         return msg.model_dump()
+
+    async def _msg_stream(self, params: Any) -> dict:
+        chat_id = params["chat_id"]
+        content = params["content"]
+        chat = await self.chat_manager.get_chat(chat_id)
+        project_id = params.get("project_id") or chat.project_id
+        if not project_id:
+            raise ChatNotFound("chat has no project_id: " + chat_id)
+        payload = MessageCreate(
+            content=content,
+            role=params.get("role", "user"),
+            rag_mode=params.get("rag_mode"),
+            rag_scope=params.get("rag_scope"),
+            temp_file_ids=params.get("temp_file_ids"),
+        )
+        await self.chat_manager.add_message(chat_id, payload)
+
+        sys_prompt = ""
+        try:
+            sys_prompt = await self.agent_binder.build_system_prompt(project_id, chat_id=chat_id)
+        except Exception as e:
+            logger.warning("build_system_prompt failed project=%s chat=%s err=%s", project_id, chat_id, e)
+
+        rag_ctx = ""
+        rag_mode = payload.rag_mode or config.DEFAULT_RAG_MODE
+        if rag_mode != "OFF":
+            try:
+                rag_result = await self.rag_coordinator.query(
+                    project_id,
+                    content,
+                    mode=payload.rag_mode,
+                    folder_ids=payload.rag_scope,
+                    chat_id=chat_id,
+                )
+                if isinstance(rag_result, dict) and "error" not in rag_result:
+                    rag_ctx = _format_rag_context(rag_result.get("results", []))
+            except Exception as e:
+                logger.warning("rag query failed project=%s chat=%s err=%s", project_id, chat_id, e)
+
+        history = self.chat_manager.store.list_messages(chat_id, limit=config.CHAT_HISTORY_LIMIT, keep_recent=True)
+        llm_messages = []
+        system_content = "\n\n".join(p for p in (sys_prompt, rag_ctx) if p).strip()
+        if system_content:
+            llm_messages.append({"role": "system", "content": system_content})
+        llm_messages += [{"role": m["role"], "content": m["content"]} for m in history]
+
+        model = params.get("model", "")
+        temperature = float(params.get("temperature", 0.7))
+        max_tokens = int(params.get("max_tokens", 4096))
+        collected = []
+        stream_error = None
+        async for chunk in self.gateway_client.chat_completions_stream(
+            llm_messages, model=model, temperature=temperature, max_tokens=max_tokens
+        ):
+            if "error" in chunk:
+                stream_error = chunk
+                logger.warning("chat stream error chunk project=%s chat=%s chunk=%s collected=%d", project_id, chat_id, chunk, len(collected))
+                break
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            token = delta.get("content", "")
+            if token:
+                collected.append(token)
+        assistant_content = "".join(collected)
+        if not assistant_content:
+            if stream_error is not None:
+                raise ProjectError("llm stream error: " + str(stream_error))
+            raise ProjectError("llm returned empty content")
+        if stream_error is not None:
+            logger.warning("chat stream recovered partial reply len=%d after error=%s", len(assistant_content), stream_error)
+        assistant_msg = await self.chat_manager.add_message(
+            chat_id, MessageCreate(role="assistant", content=assistant_content)
+        )
+        logger.info("chat stream reply project=%s chat=%s reply_len=%d", project_id, chat_id, len(assistant_content))
+        return {"message": assistant_msg.model_dump(), "project_id": project_id}
 
     async def _msg_delete(self, params: Any) -> dict:
         await self.chat_manager.delete_message(params["message_id"])
@@ -752,6 +828,22 @@ def _result(req_id: Any, result: Any) -> bytes:
     return json.dumps(
         {"jsonrpc": "2.0", "id": req_id, "result": result}
     ).encode("utf-8")
+
+
+def _format_rag_context(items: list) -> str:
+    if not items:
+        return ""
+    parts = []
+    for i, r in enumerate(items, 1):
+        if not isinstance(r, dict):
+            continue
+        doc = r.get("doc_name") or r.get("name") or r.get("id") or f"doc-{i}"
+        text = r.get("text") or r.get("content") or ""
+        score = r.get("score")
+        score_str = f" (score={score:.3f})" if isinstance(score, (int, float)) else ""
+        parts.append(f"[{i}] {doc}{score_str}\n{text}")
+    header = "以下是从专案知识库检索到的参考资料，请以其为依据回答用户问题："
+    return header + "\n\n" + "\n\n".join(parts)
 
 
 def _error(req_id: Any, code: int, message: str) -> bytes:

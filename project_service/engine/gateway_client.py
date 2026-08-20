@@ -15,10 +15,11 @@ class GatewayClient:
         self._gateway_url = config.GATEWAY_URL
         self._rag_url = config.RAG_BASE_URL
         self._agent_url = config.AGENT_STUDIO_URL
+        self._artifacts_url = config.ARTIFACTS_URL
         self._api_key = config.GATEWAY_API_KEY
         self._http = httpx.AsyncClient(timeout=timeout)
-        logger.info("GatewayClient ready gateway=%s rag=%s agent=%s auth=%s",
-                     self._gateway_url, self._rag_url, self._agent_url,
+        logger.info("GatewayClient ready gateway=%s rag=%s agent=%s artifacts=%s auth=%s",
+                     self._gateway_url, self._rag_url, self._agent_url, self._artifacts_url,
                      "on" if self._api_key else "off")
 
     async def close(self) -> None:
@@ -160,3 +161,22 @@ class GatewayClient:
 
     async def gateway_is_healthy(self) -> bool:
         return await self._health_check(f"{self._gateway_url}/health")
+
+    async def artifacts_is_healthy(self) -> bool:
+        return await self._health_check(f"{self._artifacts_url}/health")
+
+    async def artifacts_call(self, method: str, params: dict) -> dict:
+        payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
+        try:
+            resp = await self._http.post(self._artifacts_url, json=payload, headers=self._auth_headers(), timeout=10.0)
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error("artifacts %s -> %d: %s", method, e.response.status_code, e)
+            return {"error": "http_error", "status": e.response.status_code, "detail": str(e)}
+        except httpx.RequestError as e:
+            logger.error("artifacts %s request error: %s", method, e)
+            return {"error": "request_error", "detail": str(e)}
+        if "error" in data:
+            return {"error": "rpc_error", "detail": data["error"]}
+        return data.get("result", {})

@@ -15,9 +15,9 @@ optional REST API.
 > audit log, MCP server, and full project export are implemented and green.
 > CircuitBreaker + cowork removed (P1-S1 compliance A). RAG chain verified E2E:
 > project-svc → fusion-rag → fusion-mlx with BGE-M3 embeddings (score ≥ 0.6).
-> Core-feature acceptance: 75 RPC methods (incl. ping/rpc.list/tools/list
+> Core-feature acceptance: 76 RPC methods (incl. ping/rpc.list/tools/list
 > discovery), 9 MCP tools, 65 REST routes with SSE streaming, 13 SQLite tables
-> with FK cascade, 107 tests passing.
+> with FK cascade, 118 tests passing (113 unit + 5 integration).
 > **Production hardening (v0.3.0):** REST Bearer/x-api-key auth (public paths
 > exempt), per-IP rate limiting, request body size cap, SQLite WAL + busy_timeout,
 > UDS socket 0o600, graceful SIGTERM shutdown with client cleanup, secret-file
@@ -25,6 +25,21 @@ optional REST API.
 > **v0.3.1 patch:** AGENT_STUDIO_URL default 8000→11455 aligned with the fusion
 > 114xx port convention (fixes agent binding connectivity, #22); douyin e-commerce
 > AgentGraph now fetches product main images + real CDP publish (#23).
+> **v0.3.2 patch — E2E assembly (Claude Projects core capability):** chat now
+> auto-injects instructions + RAG knowledge into the LLM request at chat time.
+> `project.chat.message.stream` UDS RPC + MCP `project_send_message` dispatch to
+> it; `build_system_prompt` (agent + instructions) + `rag_coordinator.query`
+> assembled into the system message. `template_id` copies instructions + knowledge
+> + binding; `project.duplicate` copies knowledge files (disk copy + re-index) +
+> optional chats. Compliance: project_manager httpx→GatewayClient,
+> ARTIFACTS_URL env-configurable. Verified E2E with real fusion-mlx.
+> **v0.3.2 patch (P3 — integration tests):** `tests/test_chat_e2e.py` (5, `@pytest.mark.integration`)
+> proves instruction injection, RAG knowledge injection, both combined, rag_mode=OFF
+> skip, and chat-history-limit (keeps most-recent N) against a real loaded Qwen3-0.6B-4bit.
+> Bug fixes surfaced: `list_messages` now offers `keep_recent=True` (was returning
+> oldest N, not newest N for the LLM history window); `knowledge_manager.upload_file`
+> re-reads the row after auto-index so the returned `index_status` reflects INDEXED,
+> not the stale PENDING.
 
 ## Layout
 
@@ -106,14 +121,14 @@ python -m project_service.mcp_server    # communicates on stdin/stdout
 | Method | Params | Returns |
 |---|---|---|
 | `project.list` | `{include_archived?, only_starred?}` | `ProjectListItem[]` |
-| `project.create` | `ProjectCreate` (name, description?, instructions?, template_id?) | `Project` |
+| `project.create` | `ProjectCreate` (name, description?, instructions?, template_id?) | `Project` (template_id copies instructions + knowledge folders/files + agent binding from template) |
 | `project.get` | `{project_id}` | `Project` |
 | `project.update` | `{project_id, fields: ProjectUpdate}` | `Project` |
 | `project.archive` | `{project_id}` | `Project` |
 | `project.unarchive` | `{project_id}` | `Project` |
 | `project.star` | `{project_id, starred?}` | `Project` |
 | `project.delete` | `{project_id}` | `{deleted: true}` (requires archived) |
-| `project.duplicate` | `{project_id, name?}` | `Project` |
+| `project.duplicate` | `{project_id, name?, copy_chats?}` | `Project` (copies instructions + knowledge folders/files w/ disk files + re-index + agent binding; copy_chats also copies chats & messages) |
 | `project.export` | `{project_id}` | `{zip_base64, size}` |
 | `project.artifact.list` | `{project_id, artifact_type?, limit?, offset?}` | `ArtifactRef[]` |
 | `project.artifact.migrate` | `ArtifactMigrateRequest` | `ArtifactRef` |
@@ -145,6 +160,7 @@ python -m project_service.mcp_server    # communicates on stdin/stdout
 | `project.chat.detach` | `{chat_id}` | `Chat` (project_id=null) |
 | `project.chat.message.add` | `{chat_id, content, role?}` | `Message` |
 | `project.chat.message.list` | `{chat_id, limit?, offset?}` | `{messages, total}` |
+| `project.chat.message.stream` | `{chat_id, content, role?, rag_mode?, rag_scope?, model?, temperature?, max_tokens?}` | `{message: Message, project_id}` (non-streaming full reply; auto-injects instructions + RAG context, see E2E assembly) |
 | `project.chat.temp_attachment.add` | `{chat_id, file_path, original_name, file_size, mime_type?}` | `TempAttachment` |
 | `project.chat.temp_attachment.list` | `{chat_id}` | `TempAttachment[]` |
 | `project.chat.temp_attachment.delete` | `{attachment_id}` | `{deleted: true}` |
@@ -301,6 +317,32 @@ project-svc (UDS RPC)
 4. `project.rag.index_file` → calls fusion-rag upload → creates KB on first use → stores `kb_id` → returns `doc_id, chunks, chars`
 5. `project.rag.query` → calls fusion-rag search → returns results with `score ≥ 0.6`
 
+## E2E chat assembly (Claude Projects core)
+
+The three pillars — Instructions, Files (RAG knowledge), Chat history — are
+assembled into the LLM request at chat time. Both transports do the same
+assembly:
+
+- **REST** `POST /chats/{id}/messages/stream` (SSE) — streams tokens live.
+- **UDS** `project.chat.message.stream` — waits for the full reply, returns
+  `{message, project_id}` in one JSON-RPC result.
+- **MCP** `project_send_message` — dispatches to the UDS stream handler.
+
+Assembly (per request):
+
+```
+system_content = build_system_prompt(project_id, chat_id)   # agent prompt + instructions (PromptMergeMode)
+              ++ _format_rag_context(rag_coordinator.query(...))   # only when rag_mode != OFF
+llm_messages   = [system] + history(limit=FUSION_CHAT_HISTORY_LIMIT)
+                → gateway_client.chat_completions_stream(llm_messages, ...)
+```
+
+`rag_mode` (`AUTO` default / `MANUAL` / `OFF`) and `rag_scope` (folder id list)
+per message. Verified E2E: a project with instruction *"always start your reply
+with BANANA"* → `project.chat.message.stream` → assistant replies `BANANA.`,
+proving instructions are injected into the system message and obeyed by the
+real model (fusion-mlx via fusion-gateway).
+
 ## Storage layout
 
 ```
@@ -332,8 +374,19 @@ are `uuid4().hex`. Foreign keys cascade on project delete.
 
 ```bash
 source .venv/bin/activate
-pytest -q          # 94 tests, no LLM/model loading
+pytest -q                       # 113 unit tests, no LLM/model loading
+pytest -q -m "not integration"  # unit only (CI default tier)
+pytest -q tests/test_chat_e2e.py # 5 integration tests (need live upstreams)
 ```
+
+Two tiers via the `integration` marker (pyproject.toml):
+- **Unit** (113): tmp_path stores, never touch `~/.fusion-projects` or load models.
+- **Integration** (5, `tests/test_chat_e2e.py`): real model end-to-end. Requires
+  fusion-mlx (11434, key `dahai168`, model `Qwen3-0.6B-4bit`), fusion-rag (11436,
+  `FUSION_MLX_URL=http://127.0.0.1:11434/v1`), and fusion-gateway (11432) all up.
+  Auto-skip via `_upstreams_up()` health probe if any is down. The fixture points
+  LLM direct to fusion-mlx (11434) to run Qwen3 locally and avoid gateway
+  cloud-routing 502; still a real loaded model, no mocks.
 
 Coverage: `ProjectStore` CRUD/filters/cascade, `ProjectManager` lifecycle +
 archive-before-delete + duplicate + export, `InstructionEngine` save/snapshot/

@@ -5,6 +5,7 @@ from typing import Optional
 
 from project_service import config
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
+from project_service.engine.rag_coordinator import RAGCoordinator
 from project_service.models.knowledge import (
     FileIndexStatus,
     FolderCreate,
@@ -71,10 +72,12 @@ class KnowledgeManager:
         store: Optional[ProjectStore] = None,
         project_manager: Optional[ProjectManager] = None,
         file_store: Optional[FileStore] = None,
+        rag_coordinator: Optional[RAGCoordinator] = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.project_manager = project_manager or ProjectManager()
         self.file_store = file_store or FileStore()
+        self.rag_coordinator = rag_coordinator
 
     async def _ensure_project(self, project_id: str) -> None:
         row = self.store.get_project(project_id)
@@ -228,6 +231,17 @@ class KnowledgeManager:
             mime_type=mime_type,
         )
         logger.info("file uploaded id=%s path=%s project=%s", kfile.id, dest_path, project_id)
+        if self.rag_coordinator is not None:
+            try:
+                await self.rag_coordinator.index_file(kfile.id)
+                logger.info("auto-index triggered for file=%s project=%s", kfile.id, project_id)
+            except Exception as e:
+                logger.warning("auto-index failed file=%s project=%s err=%s (left PENDING)", kfile.id, project_id, e)
+        # re-read so the returned object reflects the post-index row (INDEXED/rag_doc_id),
+        # not the stale pre-index row from create_file.
+        refreshed = self.store.get_knowledge_file(kfile.id)
+        if refreshed:
+            return KnowledgeFile.from_row(refreshed)
         return kfile
 
     async def replace_file(
