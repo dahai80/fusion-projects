@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
+from project_service import config
 from project_service.engine.agent_binder import AgentBinder
 from project_service.engine.chat_manager import ChatManager, ChatNotFound
 from project_service.engine.gateway_client import GatewayClient
@@ -574,18 +575,61 @@ async def delete_message(
         raise HTTPException(status_code=404, detail="message not found")
 
 
+def _format_rag_context(items: list[dict]) -> str:
+    if not items:
+        return ""
+    parts = []
+    for i, r in enumerate(items, 1):
+        doc = r.get("doc_name") or r.get("name") or r.get("id") or f"doc-{i}"
+        text = r.get("text") or r.get("content") or ""
+        score = r.get("score")
+        score_str = f" (score={score:.3f})" if isinstance(score, (int, float)) else ""
+        parts.append(f"[{i}] {doc}{score_str}\n{text}")
+    header = "以下是从专案知识库检索到的参考资料，请以其为依据回答用户问题："
+    return header + "\n\n" + "\n\n".join(parts)
+
+
 @router.post("/projects/{project_id}/chats/{chat_id}/messages/stream")
 async def stream_message(
     project_id: str,
     chat_id: str,
     payload: MessageCreate,
     cm: ChatManager = Depends(get_chat_manager),
+    ab: AgentBinder = Depends(get_agent_binder),
+    rc: RAGCoordinator = Depends(get_rag_coordinator),
     gateway: GatewayClient = Depends(get_gateway_client),
 ):
     try:
         await cm.add_message(chat_id, payload)
-        history = cm.store.list_messages(chat_id, limit=50)
-        llm_messages = [{"role": m["role"], "content": m["content"]} for m in history]
+
+        sys_prompt = ""
+        try:
+            sys_prompt = await ab.build_system_prompt(project_id, chat_id=chat_id)
+        except Exception as e:
+            logger.warning("build_system_prompt failed project=%s chat=%s err=%s", project_id, chat_id, e)
+
+        rag_ctx = ""
+        rag_mode = payload.rag_mode or config.DEFAULT_RAG_MODE
+        if rag_mode != "OFF":
+            try:
+                rag_result = await rc.query(
+                    project_id,
+                    payload.content,
+                    mode=payload.rag_mode,
+                    folder_ids=payload.rag_scope,
+                    chat_id=chat_id,
+                )
+                if isinstance(rag_result, dict) and "error" not in rag_result:
+                    rag_ctx = _format_rag_context(rag_result.get("results", []))
+            except Exception as e:
+                logger.warning("rag query failed project=%s chat=%s err=%s", project_id, chat_id, e)
+
+        history = cm.store.list_messages(chat_id, limit=config.CHAT_HISTORY_LIMIT, keep_recent=True)
+        llm_messages = []
+        system_content = "\n\n".join(p for p in (sys_prompt, rag_ctx) if p).strip()
+        if system_content:
+            llm_messages.append({"role": "system", "content": system_content})
+        llm_messages += [{"role": m["role"], "content": m["content"]} for m in history]
 
         async def event_stream():
             collected = []
