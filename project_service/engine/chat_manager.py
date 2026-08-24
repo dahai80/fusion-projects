@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import shutil
@@ -92,9 +93,17 @@ class ChatManager:
         return await self.update_chat(chat_id, {"is_starred": starred}, project_id=project_id)
 
     async def delete_chat(self, chat_id: str, project_id: Optional[str] = None) -> None:
-        await self._assert_chat_in_project(chat_id, project_id)
+        chat = await self._assert_chat_in_project(chat_id, project_id)
         if not self.store.delete_chat(chat_id):
             raise ChatNotFound(chat_id)
+        if chat.project_id:
+            attach_dir = self.file_store.project_dir(chat.project_id) / "attachments" / chat_id
+            try:
+                if attach_dir.exists():
+                    shutil.rmtree(attach_dir)
+                    logger.info("chat attachments dir removed id=%s dir=%s", chat_id, attach_dir)
+            except OSError as e:
+                logger.warning("chat attachments dir cleanup failed id=%s dir=%s err=%s", chat_id, attach_dir, e)
         logger.info("chat deleted id=%s", chat_id)
 
     async def move_chat(self, chat_id: str, target_project_id: str, project_id: Optional[str] = None) -> Chat:
@@ -131,8 +140,8 @@ class ChatManager:
             "fork_from_snapshot_id": snapshot.id,
         }
         row = self.store.create_chat(fork_data)
-        source_msgs = self.store.list_messages(chat_id, limit=10000)
-        self.store.create_messages_batch(row["id"], source_msgs)
+        source_msgs = await asyncio.to_thread(self.store.list_messages, chat_id, limit=10000)
+        await asyncio.to_thread(self.store.create_messages_batch, row["id"], source_msgs)
         logger.info("chat forked from=%s to=%s snapshot=%s msgs=%d", chat_id, row["id"], snapshot.id, len(source_msgs))
         return Chat.from_row(row)
 
@@ -260,6 +269,12 @@ class ChatManager:
         if not existing:
             raise ChatNotFound(f"temp attachment {attachment_id}")
         await self._assert_chat_in_project(existing["chat_id"], project_id)
+        old_path = Path(existing["file_path"])
+        try:
+            if old_path.exists():
+                old_path.unlink()
+        except OSError as e:
+            logger.warning("temp attachment unlink failed id=%s path=%s err=%s", attachment_id, old_path, e)
         deleted = self.store.delete_temp_attachment(attachment_id)
         logger.info("temp attachment deleted id=%s deleted=%s", attachment_id, deleted)
         return deleted

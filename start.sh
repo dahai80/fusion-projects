@@ -18,12 +18,26 @@ export FUSION_AGENT_STUDIO_URL="${FUSION_AGENT_STUDIO_URL:-http://127.0.0.1:1145
 
 mkdir -p "$LOG_DIR"
 
+# process-identity check: a live PID is ours only if its cmdline still
+# references the daemon entry. prevents stale-PID reuse → false "already running".
+_pid_is_daemon() {
+    local pid="$1"
+    local cmd
+    cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    [ -n "$cmd" ] || return 1
+    case "$cmd" in
+        *project_service.daemon_server*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 is_running() {
     [ -f "$PID_FILE" ] || return 1
     local pid
     pid="$(cat "$PID_FILE" 2>/dev/null || true)"
     [ -n "$pid" ] || return 1
-    kill -0 "$pid" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null || return 1
+    _pid_is_daemon "$pid"
 }
 
 do_start() {
@@ -31,9 +45,20 @@ do_start() {
         echo "fusion-project-svc already running (pid $(cat "$PID_FILE"))"
         return 0
     fi
+    # stale PID file left by a crashed/killed instance: clear it so we don't
+    # mistake a reused PID for our daemon.
+    rm -f "$PID_FILE"
     if [ -d "$VENV_DIR" ]; then
         # shellcheck disable=SC1091
         source "$VENV_DIR/bin/activate"
+    fi
+    # flock guards against two start invocations racing to spawn a daemon.
+    # fd 9 held open by the daemon child inherits the lock; released on exit.
+    exec 9>"$PID_FILE.lock"
+    if ! flock -n 9; then
+        exec 9>&-
+        echo "fusion-project-svc start lock held by another process, aborting" >&2
+        return 1
     fi
     rm -f "$SOCK_PATH"
     nohup $ENTRY >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
@@ -45,6 +70,7 @@ do_start() {
     else
         echo "fusion-project-svc failed to start, see $STDERR_LOG" >&2
         rm -f "$PID_FILE"
+        exec 9>&-
         return 1
     fi
 }
@@ -63,7 +89,8 @@ do_stop() {
         sleep 0.3
     done
     kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
-    rm -f "$PID_FILE" "$SOCK_PATH"
+    rm -f "$PID_FILE" "$SOCK_PATH" "$PID_FILE.lock"
+    exec 9>&- 2>/dev/null || true
     echo "fusion-project-svc stopped"
 }
 

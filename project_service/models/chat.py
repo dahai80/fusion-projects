@@ -97,6 +97,10 @@ class MessageCreate(BaseModel):
     role: str = "user"
     rag_mode: Optional[str] = None
     rag_scope: Optional[list[str]] = None
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = None
 
 
 class TempAttachment(BaseModel):

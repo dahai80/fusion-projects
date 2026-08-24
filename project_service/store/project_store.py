@@ -225,6 +225,7 @@ class ProjectStore:
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute(f"PRAGMA wal_autocheckpoint = {config.WAL_AUTO_CHECKPOINT}")
         self._ensure_schema()
         logger.info("ProjectStore ready db=%s", self.db_path)
 

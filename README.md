@@ -9,7 +9,7 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.4.0 — adversarial audit fix pass complete (18 findings); production-hardened for public/internet deployment.**
+> **Status: v0.4.1 — availability pass complete; adversarial audit's 42/100 Blocked verdict fully addressed across all four layers (架构硬伤 H1-H7, 运行时风险 R1-R8, 工程实现缺陷 E1-E7, fix-blocks B1-B12).**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
@@ -59,6 +59,40 @@ optional REST API.
 > 113 unit/integration tests green; live `chat_completions_stream` re-verified against
 > fusion-mlx (Qwen3.5-9B-4bit → PONG). 5 E2E tests need fusion-rag (11436), skipped
 > when that upstream is down.
+> **v0.4.1 — availability pass (audit-0824 availability layer, 28 findings H/R/E/B):**
+> **架构硬伤** — H1 sqlite3 no longer blocks the event loop: hot-path + bulk reads
+> offloaded via `asyncio.to_thread` (store is thread-safe under its `RLock`; sub-ms
+> PK lookups stay sync). H2 transport drift closed: REST SSE chat now mirrors daemon
+> (model/temperature/max_tokens honored, `isinstance` RAG guard, ownership checks);
+> both surfaces share the injected manager store. H3 per-upstream isolated
+> `httpx.AsyncClient` pools (`httpx.Limits`, `GATEWAY_POOL_MAX_CONN/KEEPALIVE`) so a
+> long-lived gateway stream cannot starve RAG/agent/artifacts. H4 KB-id cache
+> self-heals: `_ensure_kb` probes on use, clears stale `kb_id` on 404 and rebuilds.
+> H5 real UDS streaming: `stream.delta` JSON-RPC notification frames emitted as
+> tokens arrive (was full-collect-then-return). H6 state reconciliation: delete/
+> replace chain `remove_file_index` + disk `unlink`; `delete_project` calls
+> `rag_delete_kb`; `delete_chat`/`delete_temp_attachment` unlink attachments dir.
+> H7 MCP split-brain removed: REST-mounted MCP reuses `app.state` managers/store
+> (MCP stdio routes through the daemon, no second `ProjectStore()`).
+> **运行时风险** — R1 multi-folder RAG query (per-folder `gather` + merge, was
+> silent first-only). R3 SSE client disconnect cancels upstream LLM stream.
+> R4/R5 dead `agent_execute` + zombie `cowork.trigger/status` removed from the
+> handler registry (`rpc.list` no longer advertises them). R6 RAG context fenced
+> with `<retrieved_document>` + untrusted-content instruction. R7 UDS request-line
+> byte cap (`UDS_MAX_LINE_BYTES`, over-limit disconnects). R8 export/duplicate
+> offloaded to a thread (no event-loop-blocking O(N) loops).
+> **工程实现缺陷** — E1 per-project + global disk quota (`check_quota` at upload/
+> replace, 507 on REST, −32014 on RPC). E2 `wal_autocheckpoint` + periodic
+> `wal_checkpoint(TRUNCATE)`. E3 `RotatingFileHandler` (`LOG_MAX_BYTES`/`BACKUP_COUNT`).
+> E4 export streamed in chunks over UDS (`project.export.stream`, inline path capped
+> at `EXPORT_INLINE_MAX_BYTES`). E5 rate limiter honors `X-Forwarded-For` + IP-cap
+> eviction (`RATE_MAX_IPS`). E6 PID file `flock` + process-identity check
+> (`_pid_is_daemon`, no stale-PID reuse). E7 temp attachments cleaned on chat delete.
+> **并发** — chat stream runs agent-prompt + RAG-query concurrently (`asyncio.gather`);
+> upstream health checks fan out; `index_folder` indexes files concurrently under a
+> semaphore with a per-project KB-creation lock (no duplicate KB).
+> 125 tests passing (121 unit + 4 new H3 fan-out; 5 integration skipped when
+> fusion-rag/11436 down).
 
 ## Layout
 

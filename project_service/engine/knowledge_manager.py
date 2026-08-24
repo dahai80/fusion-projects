@@ -13,7 +13,7 @@ from project_service.models.knowledge import (
     KnowledgeFile,
     KnowledgeFolder,
 )
-from project_service.store.file_store import FileStore
+from project_service.store.file_store import FileStore, QuotaExceeded
 from project_service.store.project_store import ProjectStore
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,10 @@ class FolderNotFound(KnowledgeError):
 
 
 class KnowledgeFileNotFound(KnowledgeError):
+    pass
+
+
+class KnowledgeQuotaExceeded(KnowledgeError):
     pass
 
 
@@ -132,9 +136,15 @@ class KnowledgeManager:
         return KnowledgeFolder.from_row(row)
 
     async def delete_folder(self, folder_id: str) -> None:
+        folder = self.store.get_folder(folder_id)
+        if not folder:
+            raise FolderNotFound(folder_id)
+        files = self.store.list_knowledge_files(folder["project_id"], folder_id=folder_id)
+        for f in files:
+            await self.delete_file(f["id"])
         if not self.store.delete_folder(folder_id):
             raise FolderNotFound(folder_id)
-        logger.info("folder deleted id=%s", folder_id)
+        logger.info("folder deleted id=%s files_cleaned=%d", folder_id, len(files))
 
     async def create_file(
         self,
@@ -192,6 +202,20 @@ class KnowledgeManager:
         return KnowledgeFile.from_row(row)
 
     async def delete_file(self, file_id: str) -> None:
+        kfile = self.store.get_knowledge_file(file_id)
+        if not kfile:
+            raise KnowledgeFileNotFound(file_id)
+        if self.rag_coordinator is not None:
+            try:
+                await self.rag_coordinator.remove_file_index(file_id)
+            except Exception as e:
+                logger.warning("rag index cleanup failed file=%s err=%s (continuing delete)", file_id, e)
+        old_path = Path(kfile["file_path"])
+        try:
+            if old_path.exists():
+                old_path.unlink()
+        except OSError as e:
+            logger.warning("disk unlink failed file=%s path=%s err=%s", file_id, old_path, e)
         if not self.store.delete_knowledge_file(file_id):
             raise KnowledgeFileNotFound(file_id)
         logger.info("knowledge_file deleted id=%s", file_id)
@@ -221,6 +245,11 @@ class KnowledgeManager:
                 dest_dir = dest_dir / folder_id
         dest_dir.mkdir(parents=True, exist_ok=True)
         file_size = src.stat().st_size
+        try:
+            self.file_store.check_quota(project_id, file_size)
+        except QuotaExceeded as e:
+            logger.warning("upload rejected by quota project=%s file=%s size=%s err=%s", project_id, original_name, file_size, e)
+            raise KnowledgeQuotaExceeded(str(e)) from e
         safe_name = _sanitize_name(original_name)
         dest_path = (dest_dir / safe_name).resolve()
         if not dest_path.is_relative_to(dest_dir.resolve()):
@@ -264,15 +293,33 @@ class KnowledgeManager:
         if not existing:
             raise KnowledgeFileNotFound(file_id)
         src = _validate_source(source_path)
+        if self.rag_coordinator is not None:
+            try:
+                await self.rag_coordinator.remove_file_index(file_id)
+            except Exception as e:
+                logger.warning("old rag index removal failed file=%s err=%s (continuing replace)", file_id, e)
         old_path = Path(existing["file_path"])
         if old_path.exists():
             old_path.unlink()
-        shutil.copy2(str(src), str(old_path))
         file_size = src.stat().st_size
-        row = self.store.update_knowledge_file(file_id, {
+        try:
+            self.file_store.check_quota(existing["project_id"], file_size)
+        except QuotaExceeded as e:
+            logger.warning("replace rejected by quota file=%s size=%s err=%s", file_id, file_size, e)
+            raise KnowledgeQuotaExceeded(str(e)) from e
+        shutil.copy2(str(src), str(old_path))
+        self.store.update_knowledge_file(file_id, {
             "file_size": file_size,
             "index_status": "PENDING",
+            "rag_doc_id": None,
         })
+        if self.rag_coordinator is not None:
+            try:
+                await self.rag_coordinator.index_file(file_id)
+                logger.info("re-index triggered for replaced file=%s", file_id)
+            except Exception as e:
+                logger.warning("re-index failed file=%s err=%s (left PENDING)", file_id, e)
+        row = self.store.get_knowledge_file(file_id)
         logger.info("file replaced id=%s new_size=%d", file_id, file_size)
         return KnowledgeFile.from_row(row)
 

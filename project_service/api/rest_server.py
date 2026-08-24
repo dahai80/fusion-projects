@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from project_service import config
 from project_service.api.routes import router
+from project_service.daemon_server import ProjectRPCServer
 from project_service.api.security import (
     AuthMiddleware,
     BodySizeMiddleware,
@@ -51,7 +52,7 @@ def create_app(
         except Exception as e:
             logger.error("project store close failed: %s", e)
 
-    app = FastAPI(title="Fusion-Projects", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="Fusion-Projects", version="0.4.1", lifespan=lifespan)
     injected_store = getattr(project_manager, "store", None) if project_manager else None
     if project_manager is not None:
         pm = project_manager
@@ -79,7 +80,16 @@ def create_app(
     app.state.agent_binder = agent_binder or AgentBinder(
         store=pm_store, project_manager=pm, upstream=gateway_client
     )
-    app.state.mcp_server = MCPServer()
+    shared_rpc = ProjectRPCServer(
+        project_manager=pm,
+        instruction_engine=app.state.instruction_engine,
+        chat_manager=app.state.chat_manager,
+        knowledge_manager=app.state.knowledge_manager,
+        agent_binder=app.state.agent_binder,
+        rag_coordinator=rc,
+        upstream=gateway_client,
+    )
+    app.state.mcp_server = MCPServer(rpc_server=shared_rpc)
     app.state.gateway_client = gateway_client
     app.add_middleware(AuthMiddleware)
     app.add_middleware(BodySizeMiddleware)
@@ -98,11 +108,18 @@ app = create_app()
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
+    from logging.handlers import RotatingFileHandler
+    fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     config.ensure_dirs()
+    fh = RotatingFileHandler(
+        str(config.LOG_DIR / "rest.log"),
+        maxBytes=config.LOG_MAX_BYTES,
+        backupCount=config.LOG_BACKUP_COUNT,
+    )
+    fh.setFormatter(fmt)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(fh)
     logger.info("starting REST on %s:%s", config.REST_HOST, config.REST_PORT)
     uvicorn.run(app, host=config.REST_HOST, port=config.REST_PORT, log_level="info")
 

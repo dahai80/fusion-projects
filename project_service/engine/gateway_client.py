@@ -27,19 +27,49 @@ class GatewayClient:
         self._agent_url = config.AGENT_STUDIO_URL
         self._artifacts_url = config.ARTIFACTS_URL
         self._api_key = config.GATEWAY_API_KEY
-        self._http = httpx.AsyncClient(timeout=timeout)
+        # per-upstream isolated pools so a long-lived gateway stream connection
+        # cannot starve RAG/agent/artifacts requests (H3 fix). each pool capped
+        # independently with explicit limits + per-upstream timeout.
+        self._pool_limits = httpx.Limits(
+            max_connections=config.GATEWAY_POOL_MAX_CONN,
+            max_keepalive_connections=config.GATEWAY_POOL_MAX_KEEPALIVE,
+        )
+        self._http_gateway = httpx.AsyncClient(timeout=timeout, limits=self._pool_limits)
+        self._http_rag = httpx.AsyncClient(timeout=timeout, limits=self._pool_limits)
+        self._http_agent = httpx.AsyncClient(timeout=timeout, limits=self._pool_limits)
+        self._http_artifacts = httpx.AsyncClient(timeout=10.0, limits=self._pool_limits)
         logger.info("GatewayClient ready gateway=%s rag=%s agent=%s artifacts=%s auth=%s",
                      self._gateway_url, self._rag_url, self._agent_url, self._artifacts_url,
                      "on" if self._api_key else "off")
 
     async def close(self) -> None:
-        await self._http.aclose()
+        for name, client in (
+            ("gateway", self._http_gateway),
+            ("rag", self._http_rag),
+            ("agent", self._http_agent),
+            ("artifacts", self._http_artifacts),
+        ):
+            try:
+                await client.aclose()
+            except Exception as e:
+                logger.warning("gateway client %s close failed: %s", name, e)
         logger.info("GatewayClient closed")
 
     def _auth_headers(self) -> dict:
         if self._api_key:
             return {"Authorization": f"Bearer {self._api_key}"}
         return {}
+
+    def _client_for(self, base_url: str) -> httpx.AsyncClient:
+        if base_url == self._gateway_url:
+            return self._http_gateway
+        if base_url == self._rag_url:
+            return self._http_rag
+        if base_url == self._agent_url:
+            return self._http_agent
+        if base_url == self._artifacts_url:
+            return self._http_artifacts
+        return self._http_gateway
 
     async def _request(
         self,
@@ -52,11 +82,12 @@ class GatewayClient:
         retries: int = _MAX_RETRIES,
     ) -> dict:
         url = f"{base_url}{path}"
+        client = self._client_for(base_url)
         last_exc: Optional[Exception] = None
         last_status: Optional[int] = None
         for attempt in range(retries + 1):
             try:
-                resp = await self._http.request(
+                resp = await client.request(
                     method, url, json=json_data, params=params,
                     headers=self._auth_headers(),
                 )
@@ -84,8 +115,9 @@ class GatewayClient:
         raise GatewayError(f"{method} {url} failed after {retries} retries: {detail}")
 
     async def _health_check(self, url: str) -> bool:
+        client = self._client_for(url.rsplit("/", 1)[0]) if "/" in url else self._http_gateway
         try:
-            resp = await self._http.get(url, timeout=5.0)
+            resp = await client.get(url, timeout=5.0)
             return resp.status_code == 200
         except Exception:
             return False
@@ -127,6 +159,15 @@ class GatewayClient:
     async def rag_get_kb(self, kb_id: str) -> dict:
         return await self._request(self._rag_url, "GET", f"/kb/bases/{kb_id}")
 
+    async def rag_kb_status(self, kb_id: str) -> int:
+        url = f"{self._rag_url}/kb/bases/{kb_id}"
+        try:
+            resp = await self._http_rag.get(url, timeout=10.0, headers=self._auth_headers())
+            return resp.status_code
+        except Exception as e:
+            logger.warning("rag kb status probe error kb_id=%s err=%s", kb_id, e)
+            return -1
+
     async def rag_delete_kb(self, kb_id: str) -> dict:
         return await self._request(self._rag_url, "DELETE", f"/kb/bases/{kb_id}")
 
@@ -163,7 +204,7 @@ class GatewayClient:
         if model:
             payload["model"] = model
         try:
-            async with self._http.stream("POST", url, json=payload, timeout=120.0, headers=self._auth_headers()) as resp:
+            async with self._http_gateway.stream("POST", url, json=payload, timeout=120.0, headers=self._auth_headers()) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data: "):
@@ -195,7 +236,7 @@ class GatewayClient:
         last_status: Optional[int] = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
-                resp = await self._http.post(self._artifacts_url, json=payload, headers=self._auth_headers(), timeout=10.0)
+                resp = await self._http_artifacts.post(self._artifacts_url, json=payload, headers=self._auth_headers(), timeout=10.0)
                 resp.raise_for_status()
                 data = resp.json()
                 if "error" in data:

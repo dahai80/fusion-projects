@@ -52,9 +52,10 @@ class BodySizeMiddleware(BaseHTTPMiddleware):
 
 
 class _RateLimiter:
-    def __init__(self, limit: int, window: float) -> None:
+    def __init__(self, limit: int, window: float, max_ips: int) -> None:
         self.limit = limit
         self.window = window
+        self.max_ips = max_ips
         self._hits: dict[str, list[float]] = defaultdict(list)
 
     def check(self, key: str) -> bool:
@@ -65,9 +66,23 @@ class _RateLimiter:
         if len(fresh) >= self.limit:
             self._hits[key] = fresh
             return False
+        if key not in self._hits and len(self._hits) >= self.max_ips:
+            self._evict()
         fresh.append(now)
         self._hits[key] = fresh
         return True
+
+    def _evict(self) -> None:
+        now = time.monotonic()
+        cutoff = now - self.window
+        stale = [k for k, v in self._hits.items() if not any(t > cutoff for t in v)]
+        for k in stale:
+            del self._hits[k]
+        if len(self._hits) >= self.max_ips:
+            oldest = sorted(self._hits, key=lambda k: min(self._hits[k]) if self._hits[k] else now)
+            for k in oldest[: max(1, len(self._hits) - self.max_ips + 1)]:
+                del self._hits[k]
+            logger.warning("rate limiter ip cap reached max_ips=%d evicted to %d", self.max_ips, len(self._hits))
 
 
 _rate_limiter: Optional[_RateLimiter] = None
@@ -76,7 +91,7 @@ _rate_limiter: Optional[_RateLimiter] = None
 def _get_rate_limiter() -> _RateLimiter:
     global _rate_limiter
     if _rate_limiter is None:
-        _rate_limiter = _RateLimiter(config.REST_RATE_LIMIT, config.REST_RATE_WINDOW)
+        _rate_limiter = _RateLimiter(config.REST_RATE_LIMIT, config.REST_RATE_WINDOW, config.RATE_MAX_IPS)
     return _rate_limiter
 
 
@@ -89,7 +104,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
-        client = request.client.host if request.client else "unknown"
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            client = xff.split(",")[0].strip() or "unknown"
+        else:
+            client = request.client.host if request.client else "unknown"
         if not _get_rate_limiter().check(client):
             logger.warning("rest rate limit exceeded client=%s path=%s", client, request.url.path)
             return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"})
