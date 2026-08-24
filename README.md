@@ -582,6 +582,22 @@ this service:
 
 ## Changelog
 
+### v0.4.5 — Python 3.12 import crash fix (CI green)
+- **Production blocker fixed**: `ProjectManager` defines `async def list(...)`,
+  shadowing the builtin `list` in the class namespace. The annotations
+  `-> list[ProjectListItem]` and `-> list[ArtifactRef]` are evaluated eagerly at
+  class-definition time on Python 3.11/3.12, resolving `list` to the method
+  object → `TypeError: 'function' object is not subscriptable` → service fails
+  to import on the declared 3.12 runtime → all tests fail to collect → CI red
+  on every run since the workflow landed in v0.4.3.
+- **Why local stayed green**: repo venv ran Python 3.14 (lazy annotations,
+  PEP 649), masking the shadow. Monorepo `.python-version` pins 3.12 — the
+  production target.
+- **Fix**: `from __future__ import annotations` (postponed evaluation). Single
+  line, behavior-preserving, no caller change.
+- **Verified on Python 3.12.14** (clean venv matching the CI matrix): 148
+  passing (143 unit + 5 E2E integration). CI green for the first time.
+
 ### v0.4.4 — residual risk pass
 - **Auth-off bind guard**: REST server refuses to start (fail-fast `RuntimeError`)
   when auth is off, unacknowledged, **and** bound to a non-loopback host. Loopback
