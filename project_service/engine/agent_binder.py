@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from project_service.engine.gateway_client import GatewayClient
+from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
 from project_service.models.agent_binding import (
     AgentBinding,
@@ -70,6 +70,11 @@ class AgentBinder:
         chat_id: Optional[str] = None,
     ) -> AgentBinding:
         await self._ensure_project(project_id)
+        if agent_id:
+            preview = await self.get_agent_preview(agent_id)
+            if preview is None:
+                logger.warning("agent not found upstream agent_id=%s, rejecting bind", agent_id)
+                raise AgentUnavailable(f"agent {agent_id} not found upstream, cannot bind")
         existing = self.store.get_binding_by_project(project_id) if not chat_id else self.store.get_binding_by_chat(chat_id)
         if existing:
             fields: dict = {}
@@ -101,9 +106,10 @@ class AgentBinder:
             logger.info("binding removed project=%s chat=%s", project_id, chat_id)
 
     async def list_available_agents(self) -> list[AgentMeta]:
-        result = await self.upstream.agent_list()
-        if "error" in result:
-            logger.warning("failed to list agents: %s", result.get("detail"))
+        try:
+            result = await self.upstream.agent_list()
+        except GatewayError as e:
+            logger.warning("failed to list agents: %s", e)
             return []
         agents = result if isinstance(result, list) else result.get("agents", result.get("data", []))
         metas = []
@@ -118,9 +124,13 @@ class AgentBinder:
         return metas
 
     async def get_agent_preview(self, agent_id: str) -> Optional[AgentPreview]:
-        result = await self.upstream.agent_get(agent_id)
-        if "error" in result:
-            logger.warning("failed to get agent %s: %s", agent_id, result.get("detail"))
+        try:
+            result = await self.upstream.agent_get(agent_id)
+        except GatewayError as e:
+            logger.warning("failed to get agent %s: %s", agent_id, e)
+            return None
+        if not result:
+            logger.warning("agent %s not found upstream (empty response)", agent_id)
             return None
         return AgentPreview(
             agent_id=result.get("id", result.get("agent_id", agent_id)),

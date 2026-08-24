@@ -7,8 +7,11 @@ cd "$SCRIPT_DIR"
 VENV_DIR="$SCRIPT_DIR/.venv"
 PID_FILE="$SCRIPT_DIR/.fusion-project-svc.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
-STDOUT_LOG="$LOG_DIR/stdout.log"
-STDERR_LOG="$LOG_DIR/stderr.log"
+# boot.log captures only pre-handler startup output (before the in-process
+# RotatingFileHandler attaches to stdout.log). The daemon owns stdout.log
+# rotation in-process (config.LOG_MAX_BYTES / LOG_BACKUP_COUNT); pointing the
+# shell redirect at the same file would collide on rotation (inode divergence).
+BOOT_LOG="$LOG_DIR/boot.log"
 ENTRY="python3 -m project_service.daemon_server"
 SOCK_PATH="${FUSION_PROJECT_SOCK:-/tmp/fusion-project-svc.sock}"
 
@@ -18,12 +21,26 @@ export FUSION_AGENT_STUDIO_URL="${FUSION_AGENT_STUDIO_URL:-http://127.0.0.1:1145
 
 mkdir -p "$LOG_DIR"
 
+# process-identity check: a live PID is ours only if its cmdline still
+# references the daemon entry. prevents stale-PID reuse → false "already running".
+_pid_is_daemon() {
+    local pid="$1"
+    local cmd
+    cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    [ -n "$cmd" ] || return 1
+    case "$cmd" in
+        *project_service.daemon_server*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 is_running() {
     [ -f "$PID_FILE" ] || return 1
     local pid
     pid="$(cat "$PID_FILE" 2>/dev/null || true)"
     [ -n "$pid" ] || return 1
-    kill -0 "$pid" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null || return 1
+    _pid_is_daemon "$pid"
 }
 
 do_start() {
@@ -31,22 +48,33 @@ do_start() {
         echo "fusion-project-svc already running (pid $(cat "$PID_FILE"))"
         return 0
     fi
+    # stale PID file left by a crashed/killed instance: clear it so we don't
+    # mistake a reused PID for our daemon.
+    rm -f "$PID_FILE"
     if [ -d "$VENV_DIR" ]; then
         # shellcheck disable=SC1091
         source "$VENV_DIR/bin/activate"
     fi
+    # mkdir-based atomic lock guards against two start invocations racing to
+    # spawn a daemon (portable: no flock dependency, works on macOS + Linux).
+    if ! mkdir "$PID_FILE.lock" 2>/dev/null; then
+        echo "fusion-project-svc start lock held by another process, aborting" >&2
+        return 1
+    fi
     rm -f "$SOCK_PATH"
-    nohup $ENTRY >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
+    nohup $ENTRY >> "$BOOT_LOG" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     sleep 1
     if is_running; then
         echo "fusion-project-svc started (pid $pid, sock $SOCK_PATH)"
     else
-        echo "fusion-project-svc failed to start, see $STDERR_LOG" >&2
+        echo "fusion-project-svc failed to start, see $BOOT_LOG" >&2
         rm -f "$PID_FILE"
+        rmdir "$PID_FILE.lock" 2>/dev/null || true
         return 1
     fi
+    rmdir "$PID_FILE.lock" 2>/dev/null || true
 }
 
 do_stop() {
@@ -64,6 +92,8 @@ do_stop() {
     done
     kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
     rm -f "$PID_FILE" "$SOCK_PATH"
+    rmdir "$PID_FILE.lock" 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
     echo "fusion-project-svc stopped"
 }
 

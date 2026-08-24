@@ -25,6 +25,73 @@ async def test_health(client):
     assert r.json()["status"] == "ok"
 
 
+async def test_ready_returns_503_when_upstreams_down(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    app = client._transport.app
+    gc = app.state.gateway_client
+    monkeypatch.setattr(gc, "gateway_is_healthy", AsyncMock(return_value=False))
+    monkeypatch.setattr(gc, "rag_is_healthy", AsyncMock(return_value=False))
+    monkeypatch.setattr(gc, "agent_studio_is_healthy", AsyncMock(return_value=False))
+    r = await client.get("/ready")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert set(body["deps"].keys()) == {"gateway", "rag", "agent_studio"}
+
+
+async def test_ready_returns_200_when_upstreams_up(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    app = client._transport.app
+    gc = app.state.gateway_client
+    monkeypatch.setattr(gc, "gateway_is_healthy", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "rag_is_healthy", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "agent_studio_is_healthy", AsyncMock(return_value=True))
+    r = await client.get("/ready")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ready"
+    assert all(r.json()["deps"].values())
+
+
+async def test_metrics_returns_counters_and_health(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    from project_service import metrics as metrics_mod
+    metrics_mod.reset()
+    app = client._transport.app
+    gc = app.state.gateway_client
+    monkeypatch.setattr(gc, "gateway_is_healthy", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "rag_is_healthy", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "agent_studio_is_healthy", AsyncMock(return_value=True))
+    r = await client.get("/metrics")
+    assert r.status_code == 200
+    body = r.json()
+    assert "total_requests" in body
+    assert "requests_by_status" in body
+    assert "rate_limit_rejected" in body
+    assert "auth_rejected" in body
+    assert "upstream_health" in body
+    assert set(body["upstream_health"].keys()) == {"gateway", "rag", "agent_studio"}
+    assert all(body["upstream_health"].values())
+    metrics_mod.reset()
+
+
+async def test_metrics_records_requests(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    from project_service import metrics as metrics_mod
+    metrics_mod.reset()
+    app = client._transport.app
+    gc = app.state.gateway_client
+    monkeypatch.setattr(gc, "gateway_is_healthy", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "rag_is_healthy", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "agent_studio_is_healthy", AsyncMock(return_value=True))
+    await client.get("/health")
+    await client.get("/health")
+    r = await client.get("/metrics")
+    body = r.json()
+    assert body["total_requests"] >= 2
+    assert body["requests_by_status"].get("200", 0) >= 2
+    metrics_mod.reset()
+
+
 async def test_project_lifecycle(client):
     r = await client.post("/api/v1/projects", json={"name": "A", "description": "d"})
     assert r.status_code == 201

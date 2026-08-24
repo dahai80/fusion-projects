@@ -14,10 +14,12 @@ from project_service.store.project_store import ProjectStore
 
 @pytest.fixture
 def rpc(tmp_path):
+    from project_service.store.file_store import FileStore
     store = ProjectStore(db_path=tmp_path / "projects.db")
-    pm = ProjectManager(store=store)
+    fs = FileStore(storage_dir=tmp_path / "storage")
+    pm = ProjectManager(store=store, file_store=fs)
     ie = InstructionEngine(store=store, project_manager=pm)
-    cm = ChatManager(store=store, project_manager=pm)
+    cm = ChatManager(store=store, project_manager=pm, file_store=fs)
     km = KnowledgeManager(store=store, project_manager=pm)
 
     fake_upstream = AsyncMock(spec=GatewayClient)
@@ -262,16 +264,18 @@ async def test_chat_detach(rpc):
 
 
 @pytest.mark.asyncio
-async def test_temp_attachments(rpc):
+async def test_temp_attachments(rpc, tmp_path):
     proj = await rpc.dispatch("project.create", {"name": "ta-proj"})
     pid = proj["id"]
     chat = await rpc.dispatch(
         "project.chat.create", {"project_id": pid, "title": "ta-chat"}
     )
     cid = chat["id"]
+    src = tmp_path / "source.pdf"
+    src.write_bytes(b"%PDF-1.4 temp attachment payload")
     ta = await rpc.dispatch(
         "project.chat.temp_attachment.add",
-        {"chat_id": cid, "file_path": "/tmp/test.pdf", "original_name": "test.pdf", "file_size": 1024},
+        {"chat_id": cid, "file_path": str(src), "original_name": "test.pdf", "file_size": 1024},
     )
     assert ta["original_name"] == "test.pdf"
     tas = await rpc.dispatch(
@@ -365,22 +369,18 @@ async def test_mcp_parse_error():
 
 
 @pytest.mark.asyncio
-async def test_cowork_relay_methods_exist(rpc):
+async def test_cowork_methods_removed(rpc):
     resp = await rpc.handle_request(
         _req("cowork.trigger", {"project_id": "x", "action": "test"})
     )
     parsed = _parse(resp)
-    assert "result" in parsed
-    result = parsed["result"]
-    assert result.get("error") == "cowork_unavailable" or "error" not in result or isinstance(result, (dict, list))
+    assert parsed.get("error", {}).get("code") == -32601
 
     resp = await rpc.handle_request(
         _req("cowork.status", {"task_id": "nonexistent"})
     )
     parsed = _parse(resp)
-    assert "result" in parsed
-    result = parsed["result"]
-    assert result.get("error") == "cowork_unavailable" or "error" not in result or isinstance(result, (dict, list))
+    assert parsed.get("error", {}).get("code") == -32601
 
 
 @pytest.mark.asyncio

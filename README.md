@@ -9,7 +9,7 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.3.2 — Claude Projects E2E chat assembly landed; production-hardened for public/internet deployment.**
+> **Status: v0.4.3 — release-ops pass: CI (GitHub Actions matrix), deep `/ready` health (dependency fan-out), migration rollback (`migrate.status`/`migrate.down` RPC), auth-off made visible (loud warning not silent), E2E chat verified against live upstreams. Adversarial audit's 42/100 Blocked verdict fully addressed across all four layers + release operations.**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
@@ -40,6 +40,83 @@ optional REST API.
 > oldest N, not newest N for the LLM history window); `knowledge_manager.upload_file`
 > re-reads the row after auto-index so the returned `index_status` reflects INDEXED,
 > not the stale PENDING.
+> **v0.4.0 — adversarial audit fix pass (18 findings, full report `audit-0824.md`):**
+> Security — `original_name` path-traversal sanitized (basename + resolve-within-dest
+> check) across knowledge upload, project copy, and temp attachments; temp-attachment
+> `file_path` now source-validated (`_validate_source`) before copy. IDOR — chat /
+> snapshot / message / temp-attachment + RAG folder ops thread `project_id` ownership
+> checks (REST boundary enforces; daemon/MCP keep single-user trust). Correctness —
+> `restore_snapshot` now actually restores messages (`replace_chat_messages`),
+> snapshot stores `messages` + `instruction_snapshot_id` (was dead columns),
+> `rag_mode/top_k/threshold` use `is not None` (0 no longer swallowed), `fork_chat`
+> batch-inserts with fresh ids. Architecture — `GatewayClient._request` /
+> `artifacts_call` retry 429/5xx/timeout with exponential backoff then raise
+> `GatewayError` (no more silent error-dict), mapped to JSON-RPC −32011; `daemon` /
+> `rest` reuse the injected manager's store (no orphan `ProjectStore()`) and close it
+> on shutdown. Perf/maint — rate-limiter bucket eviction (no unbounded `_hits`),
+> dead `cowork_tasks` methods + `temp_file_ids` field + duplicate `get()` removed.
+> JSON-RPC error codes extended: −32011 gateway, −32012 chat, −32013 knowledge.
+> 113 unit/integration tests green; live `chat_completions_stream` re-verified against
+> fusion-mlx (Qwen3.5-9B-4bit → PONG). 5 E2E tests need fusion-rag (11436), skipped
+> when that upstream is down.
+> **v0.4.1 — availability pass (audit-0824 availability layer, 28 findings H/R/E/B):**
+> **架构硬伤** — H1 sqlite3 no longer blocks the event loop: hot-path + bulk reads
+> offloaded via `asyncio.to_thread` (store is thread-safe under its `RLock`; sub-ms
+> PK lookups stay sync). H2 transport drift closed: REST SSE chat now mirrors daemon
+> (model/temperature/max_tokens honored, `isinstance` RAG guard, ownership checks);
+> both surfaces share the injected manager store. H3 per-upstream isolated
+> `httpx.AsyncClient` pools (`httpx.Limits`, `GATEWAY_POOL_MAX_CONN/KEEPALIVE`) so a
+> long-lived gateway stream cannot starve RAG/agent/artifacts. H4 KB-id cache
+> self-heals: `_ensure_kb` probes on use, clears stale `kb_id` on 404 and rebuilds.
+> H5 real UDS streaming: `stream.delta` JSON-RPC notification frames emitted as
+> tokens arrive (was full-collect-then-return). H6 state reconciliation: delete/
+> replace chain `remove_file_index` + disk `unlink`; `delete_project` calls
+> `rag_delete_kb`; `delete_chat`/`delete_temp_attachment` unlink attachments dir.
+> H7 MCP split-brain removed: REST-mounted MCP reuses `app.state` managers/store
+> (MCP stdio routes through the daemon, no second `ProjectStore()`).
+> **运行时风险** — R1 multi-folder RAG query (per-folder `gather` + merge, was
+> silent first-only). R3 SSE client disconnect cancels upstream LLM stream.
+> R4/R5 dead `agent_execute` + zombie `cowork.trigger/status` removed from the
+> handler registry (`rpc.list` no longer advertises them). R6 RAG context fenced
+> with `<retrieved_document>` + untrusted-content instruction. R7 UDS request-line
+> byte cap (`UDS_MAX_LINE_BYTES`, over-limit disconnects). R8 export/duplicate
+> offloaded to a thread (no event-loop-blocking O(N) loops).
+> **工程实现缺陷** — E1 per-project + global disk quota (`check_quota` at upload/
+> replace, 507 on REST, −32014 on RPC). E2 `wal_autocheckpoint` + periodic
+> `wal_checkpoint(TRUNCATE)`. E3 `RotatingFileHandler` (`LOG_MAX_BYTES`/`BACKUP_COUNT`).
+> E4 export streamed in chunks over UDS (`project.export.stream`, inline path capped
+> at `EXPORT_INLINE_MAX_BYTES`). E5 rate limiter honors `X-Forwarded-For` + IP-cap
+> eviction (`RATE_MAX_IPS`). E6 PID file `flock` + process-identity check
+> (`_pid_is_daemon`, no stale-PID reuse). E7 temp attachments cleaned on chat delete.
+> **并发** — chat stream runs agent-prompt + RAG-query concurrently (`asyncio.gather`);
+> upstream health checks fan out; `index_folder` indexes files concurrently under a
+> semaphore with a per-project KB-creation lock (no duplicate KB).
+> 125 tests passing (121 unit + 4 new H3 fan-out; 5 integration skipped when
+> fusion-rag/11436 down).
+
+> **v0.4.2 — residual audit re-verification (4 findings the v0.4.1 declaration
+> missed, found by re-checking every audit item against current code):**
+> **H6-item4** — `set_binding` now validates the agent exists upstream before
+> storing (`get_agent_preview` returns None on missing/empty upstream response →
+> raises `AgentUnavailable`, a previously-dead exception). `get_agent_preview` is
+> now None-safe (was `AttributeError` on falsy upstream return). Daemon maps
+> `AgentUnavailable` → −32008; REST `set_agent_binding` catches `AgentBinderError`
+> → 400 (was uncaught → 500).
+> **R4** — dead `GatewayClient.agent_execute` method removed (zero callers;
+> v0.4.1 README claimed removal but the method survived).
+> **MCP domain-error mapping (H2 drift point 3)** — `tools/call` no longer bare
+> stringifies domain exceptions. `ProjectNotFound`/`ChatNotFound`/
+> `FolderNotFound`/`KnowledgeFileNotFound`/`KnowledgeQuotaExceeded`/
+> `KnowledgeError`/`AgentUnavailable`/`AgentBinderError`/`RAGError`/`GatewayError`/
+> `ProjectError` map to typed `isError` results with matching code prefixes
+> (`_MCP_DOMAIN_CODES` table mirrors the daemon error-code registry).
+> **MCP stdio byte cap (R7)** — `run_mcp_stdio` now caps each request line at
+> `MCP_MAX_LINE_BYTES` (env `FUSION_MCP_MAX_LINE_BYTES`, default 16MB, mirrors
+> `UDS_MAX_LINE_BYTES`); oversize lines get a −32604 "request too large" error
+> and the loop continues (was unbounded — same attack surface as the pre-fix UDS
+> reader).
+> 133 tests passing (125 prior + 8 new in `tests/test_mcp_server.py`; 5
+> integration skipped when upstreams down).
 
 ## Layout
 
@@ -407,3 +484,146 @@ the real `~/.fusion-projects` is never touched.
 - `logger = logging.getLogger(__name__)` per module; `logging.basicConfig` only in
   entry points.
 - 4-space indentation, no docstrings.
+
+## Release operations (v0.4.3)
+
+### CI
+`.github/workflows/ci.yml` runs on push (branches `master`, `fix/**`) and pull
+request to `master`. The **test** job runs `pytest tests/ -v` on a Python 3.11
++ 3.12 matrix and uploads the report artifact; the **build** job (needs test)
+runs `python -m build` and uploads the `dist/` artifact. No lint job — this
+project defines no ruff config (do not invent one).
+
+### Health checks
+- `GET /health` — liveness, always 200 `{"status":"ok"}` (no dependency probe).
+- `GET /ready` — **readiness**. Fans out to all three upstreams concurrently
+  (`asyncio.gather`): `gateway_is_healthy` (11432), `rag_is_healthy` (11436),
+  `agent_studio_is_healthy` (11455). Returns `200 {"status":"ready","deps":{...}}`
+  when all reachable, else `503 {"status":"degraded","deps":{...}}` naming which
+  dependency is down. `/ready` is a public path (auth-exempt) so load balancers
+  and orchestrators can probe it without credentials.
+
+### Deploy
+```bash
+cd ~/fusion/fusion-projects
+source .venv/bin/activate
+pip install -e ".[test]"          # refresh install after a pull
+./start.sh restart                 # UDS daemon
+curl -s http://127.0.0.1:11440/ready   # confirm deps green before serving traffic
+```
+Logs: the daemon rotates `~/.fusion-projects/logs/stdout.log` in-process
+(`FUSION_LOG_MAX_BYTES` default 50 MiB, `FUSION_LOG_BACKUP_COUNT` default 5).
+`start.sh` writes only pre-handler boot output to `logs/boot.log` (project-local);
+runtime logs live under the data dir, not next to `start.sh`.
+
+REST API auth is **off by default**. Two guards:
+- **Fail-fast bind guard**: if `FUSION_REST_API_KEY` is unset, `FUSION_REST_ALLOW_NO_AUTH`
+  is not set, **and** `FUSION_PROJECT_HOST` is a non-loopback address (e.g. `0.0.0.0`),
+  the REST server refuses to start (`RuntimeError`). Loopback binds (default
+  `127.0.0.1`) are allowed unauthenticated — single-user local-first is the design intent.
+- For any deployment beyond single-user localhost, set a key before start:
+```bash
+export FUSION_REST_API_KEY="$(openssl rand -hex 32)"
+./start.sh restart
+```
+If you intentionally run unauthenticated (local dev only), acknowledge it so the
+startup warning downgrades from CRITICAL to a one-time WARNING:
+```bash
+export FUSION_REST_ALLOW_NO_AUTH=1
+```
+
+### Observability
+- `GET /metrics` — public (auth-exempt) JSON snapshot of in-process counters:
+  `total_requests`, `requests_by_status`, `rate_limit_rejected`, `auth_rejected`,
+  `body_oversize_rejected`, live `upstream_health` (gateway/rag/agent-studio),
+  `auth` state, and the active `rate_limit` (limit + window). No Prometheus
+  dependency — poll with `curl` or scrape into any collector.
+- Rate limit default: **60 requests / 60 s per IP** (`FUSION_REST_RATE_LIMIT`,
+  `FUSION_REST_RATE_WINDOW`), tuned for production. Override for higher throughput.
+- Per-module `logging` at INFO; `start.sh` / `rest_server.main()` attach
+  `RotatingFileHandler` to the root logger.
+
+### Schema migration + rollback
+`ProjectStore` tracks schema via `PRAGMA user_version`; `SCHEMA_VERSION` is the
+latest. Every additive migration must add a matching `_ROLLBACK_SQL[v]` entry.
+
+Check current state (UDS RPC, or `store.migrate_status()` directly):
+```jsonc
+// rpc: migrate.status
+{"current_version": 2, "latest_version": 2, "rollbackable_versions": [2, 1]}
+```
+
+Roll back to a prior version (destructive — drops additive columns):
+```jsonc
+// rpc: migrate.down
+{"target_version": 1, "confirm": "rollback-schema"}
+```
+`confirm` must equal the literal `rollback-schema` to acknowledge the destructive
+schema change. Invalid targets (negative, or > current) raise `ValueError`. A
+forward re-run of `ProjectStore` initialization re-applies the up-migrations.
+
+## Known constraints (not defects)
+
+These are deliberate design boundaries or tracked-upstream items, not bugs in
+this service:
+
+- **Single-node, local-first** — one UDS daemon + one SQLite DB, no horizontal
+  scaling, no clustering. This matches the Fusion "一核九端" local-first
+  architecture: this service is a per-machine project asset container, not a
+  multi-tenant cloud service. Scaling out is out of scope; if a deployment needs
+  it, run one instance per node.
+- **Upstream fusion-mlx `DraftModelDecoder.config` 500** — chat completion with
+  model `Qwen3-0.6B-4bit` returns HTTP 500 from fusion-mlx (speculative-decoding
+  draft model missing `.config`). Tracked upstream: **dahai80/fusion-mlx#623**
+  (issue → PR → land per monorepo rule; not fixed here). Workaround: use a
+  confirmed-loaded chat model (`Qwen3.5-4B-bf16`, `Qwen3.5-9B-4bit`,
+  `Qwen3.8-27B-4bit`); `GatewayClient` surfaces upstream 5xx as `GatewayError`
+  → JSON-RPC −32011 / HTTP 502, so callers see a clear error, not a silent hang.
+
+## Changelog
+
+### v0.4.4 — residual risk pass
+- **Auth-off bind guard**: REST server refuses to start (fail-fast `RuntimeError`)
+  when auth is off, unacknowledged, **and** bound to a non-loopback host. Loopback
+  stays allowed (local-first single-user). `config.rest_host_is_loopback()` helper.
+- **Log rotation conflict fixed**: `start.sh` no longer redirects to the same
+  `stdout.log` the in-process `RotatingFileHandler` owns (inode divergence on
+  rotation). Shell redirect now captures only pre-handler boot output to
+  `logs/boot.log`; runtime logs rotate under `~/.fusion-projects/logs/`.
+- **Portable start lock**: replaced `flock` (absent on macOS) with a `mkdir`-based
+  atomic lock, released on start success/failure and on stop.
+- **Rate-limit default tightened**: `FUSION_REST_RATE_LIMIT` 120 → 60 per 60 s
+  (production-safe, still generous for UI use).
+- **`GET /metrics`**: public JSON endpoint exposing request/status counters,
+  rate-limit/auth/body rejections, live upstream health, auth state, rate config.
+  New `project_service/metrics.py` (in-process, thread-safe, no Prometheus dep).
+- 148 tests passing (143 unit + 5 E2E integration).
+
+### v0.4.3 — release-ops pass
+- **CI** (`.github/workflows/ci.yml`): Python 3.11/3.12 test matrix + `python -m
+  build` job; runs on push to `master`/`fix/**` and PRs to `master`.
+- **REST `/ready`**: deep readiness probe — concurrent fan-out to gateway/rag/
+  agent-studio, `200` ready / `503` degraded with per-dependency status.
+- **Migration rollback**: `migrate.status` + `migrate.down` RPC handlers; store
+  `migrate_down(target)` with `_ROLLBACK_SQL` per-version SQL, `confirm` guard.
+- **Auth-off visibility**: when `REST_API_KEY` unset and `FUSION_REST_ALLOW_NO_AUTH`
+  not set, `AuthMiddleware` logs CRITICAL `UNAUTHENTICATED` on every request;
+  acknowledged mode warns once. `REST_ALLOW_NO_AUTH` config knob added.
+- **E2E chat verified**: 5 integration tests run against live fusion-mlx (11434),
+  fusion-rag (11436), fusion-gateway (11432) — instruction injection, RAG
+  knowledge injection, instruction+RAG, RAG-off skip, history limit all green.
+  E2E model switched to `Qwen3.5-4B-bf16` (env `FUSION_E2E_MODEL`); the prior
+  `Qwen3-0.6B-4bit` hit upstream fusion-mlx `DraftModelDecoder.config` bug
+  (filed dahai80/fusion-mlx#623).
+- 145 tests passing (140 unit + 5 E2E integration).
+
+### v0.4.2 — residual audit re-verify
+- H6-item4: `AgentBinder.set_binding` validates agent exists upstream before
+  storing (rejects binding to a missing agent → `AgentUnavailable`).
+- R4: removed dead `GatewayClient.agent_execute` (zero callers).
+- MCP `tools/call` maps domain exceptions to typed `isError` results via
+  `_MCP_DOMAIN_CODES` (mirrors the daemon error registry).
+- MCP stdio loop enforces `FUSION_MCP_MAX_LINE_BYTES` cap (default 16 MiB),
+  replies `-32604` on oversized requests instead of crashing.
+- 133 tests passing.
+

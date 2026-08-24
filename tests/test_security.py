@@ -8,12 +8,56 @@ from project_service.store.project_store import ProjectStore
 
 
 @pytest.mark.asyncio
-async def test_rest_auth_disabled_when_no_key():
+async def test_rest_auth_disabled_when_no_key(monkeypatch):
+    monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", True)
     app = create_app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/api/v1/projects")
         assert r.status_code in (200, 404)
+
+
+@pytest.mark.asyncio
+async def test_rest_startup_refuses_non_loopback_no_auth(monkeypatch):
+    import pytest
+    monkeypatch.setattr(config, "REST_API_KEY", "")
+    monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", False)
+    monkeypatch.setattr(config, "REST_HOST", "0.0.0.0")
+    import project_service.api.rest_server as rs
+    with pytest.raises(RuntimeError):
+        app = create_app()
+        async with app.router.lifespan_context(app):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_auth_off_warns_critical_when_unacknowledged(monkeypatch, caplog):
+    monkeypatch.setattr(config, "REST_API_KEY", "")
+    monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", False)
+    from project_service.api import security
+    security.AuthMiddleware._warned_no_auth = False
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    with caplog.at_level("CRITICAL"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.get("/api/v1/projects")
+    assert any("UNAUTHENTICATED" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_auth_off_warns_once_when_acknowledged(monkeypatch, caplog):
+    monkeypatch.setattr(config, "REST_API_KEY", "")
+    monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", True)
+    from project_service.api import security
+    security.AuthMiddleware._warned_no_auth = False
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    with caplog.at_level("WARNING"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.get("/api/v1/projects")
+            await client.get("/api/v1/projects")
+    warnings = [rec for rec in caplog.records if "acknowledged" in rec.message]
+    assert len(warnings) == 1
 
 
 @pytest.mark.asyncio
@@ -46,6 +90,7 @@ async def test_rest_auth_accepts_x_api_key(monkeypatch):
 async def test_rest_body_size_rejects_oversize(monkeypatch):
     monkeypatch.setattr(config, "REST_MAX_BODY_BYTES", 16)
     monkeypatch.setattr(config, "REST_API_KEY", "")
+    monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", True)
     app = create_app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -59,6 +104,7 @@ async def test_rest_rate_limit(monkeypatch):
     monkeypatch.setattr(config, "REST_RATE_LIMIT", 3)
     monkeypatch.setattr(config, "REST_RATE_WINDOW", 60.0)
     monkeypatch.setattr(config, "REST_API_KEY", "")
+    monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", True)
     from project_service.api import security
     security.reset_rate_limiter()
     app = create_app()

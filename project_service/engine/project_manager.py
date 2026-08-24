@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import logging
@@ -7,7 +8,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-from project_service.engine.gateway_client import GatewayClient
+from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.models.artifact_ref import ArtifactRef
 from project_service.models.project import (
     Project,
@@ -149,14 +150,24 @@ class ProjectManager:
                 )
             except Exception:
                 logger.warning("failed to clear in_project_kb for artifact=%s", ar["artifact_id"])
+        kb_id = row.get("kb_id")
+        if kb_id and self.upstream is not None:
+            try:
+                await self.upstream.rag_delete_kb(kb_id=kb_id)
+                logger.info("rag kb deleted project=%s kb_id=%s", project_id, kb_id)
+            except Exception as e:
+                logger.warning("rag kb delete failed project=%s kb_id=%s err=%s (orphan possible)", project_id, kb_id, e)
         self.store.delete_project(project_id)
         self.file_store.remove_project(project_id)
         logger.info("project deleted id=%s artifacts_cleared=%d", project_id, len(artifact_rows))
 
     async def _call_artifacts_engine(self, method: str, params: dict) -> dict:
-        result = await self.upstream.artifacts_call(method, params)
-        if not isinstance(result, dict) or "error" in result:
-            raise ProjectError(f"artifacts-engine error: {result}")
+        try:
+            result = await self.upstream.artifacts_call(method, params)
+        except GatewayError as e:
+            raise ProjectError(f"artifacts-engine error: {e}") from e
+        if not isinstance(result, dict):
+            raise ProjectError(f"artifacts-engine returned non-dict: {type(result).__name__}")
         return result
 
     async def migrate_artifact(
@@ -240,32 +251,37 @@ class ProjectManager:
 
     async def export_project(self, project_id: str) -> bytes:
         proj = await self.get(project_id)
-        await self.get(project_id)
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("project.json", json.dumps(proj.model_dump(), ensure_ascii=False, indent=2))
-            instr = self.store.get_instructions(project_id)
-            if instr:
-                zf.writestr("instructions.json", json.dumps(instr, ensure_ascii=False, indent=2))
-            chats = self.store.list_chats(project_id)
-            if chats:
-                zf.writestr("chats.json", json.dumps(chats, ensure_ascii=False, indent=2))
-                for c in chats:
-                    cid = c["id"]
-                    msgs = self.store.list_messages(cid)
-                    if msgs:
-                        zf.writestr(f"chats/{cid}/messages.json", json.dumps(msgs, ensure_ascii=False, indent=2))
-            folders = self.store.list_folders(project_id)
-            if folders:
-                zf.writestr("knowledge_folders.json", json.dumps(folders, ensure_ascii=False, indent=2))
-            files = self.store.list_knowledge_files(project_id)
-            if files:
-                zf.writestr("knowledge_files.json", json.dumps(files, ensure_ascii=False, indent=2))
-            binding = self.store.get_binding_by_project(project_id)
-            if binding:
-                zf.writestr("agent_binding.json", json.dumps(binding, ensure_ascii=False, indent=2))
+        proj_dump = proj.model_dump()
+
+        def _build_zip() -> bytes:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("project.json", json.dumps(proj_dump, ensure_ascii=False, indent=2))
+                instr = self.store.get_instructions(project_id)
+                if instr:
+                    zf.writestr("instructions.json", json.dumps(instr, ensure_ascii=False, indent=2))
+                chats = self.store.list_chats(project_id)
+                if chats:
+                    zf.writestr("chats.json", json.dumps(chats, ensure_ascii=False, indent=2))
+                    for c in chats:
+                        cid = c["id"]
+                        msgs = self.store.list_messages(cid)
+                        if msgs:
+                            zf.writestr(f"chats/{cid}/messages.json", json.dumps(msgs, ensure_ascii=False, indent=2))
+                folders = self.store.list_folders(project_id)
+                if folders:
+                    zf.writestr("knowledge_folders.json", json.dumps(folders, ensure_ascii=False, indent=2))
+                files = self.store.list_knowledge_files(project_id)
+                if files:
+                    zf.writestr("knowledge_files.json", json.dumps(files, ensure_ascii=False, indent=2))
+                binding = self.store.get_binding_by_project(project_id)
+                if binding:
+                    zf.writestr("agent_binding.json", json.dumps(binding, ensure_ascii=False, indent=2))
+            return buf.getvalue()
+
+        data = await asyncio.to_thread(_build_zip)
         logger.info("exported full project=%s", project_id)
-        return buf.getvalue()
+        return data
 
     async def remove_artifact(self, artifact_id: str) -> bool:
         existing = self.store.get_artifact_ref(artifact_id)
@@ -309,17 +325,17 @@ class ProjectManager:
     ) -> None:
         source_id = source.id
         if copy_instructions:
-            instr = self.store.get_instructions(source_id)
+            instr = await asyncio.to_thread(self.store.get_instructions, source_id)
             if instr and instr.get("content"):
-                self.store.save_instructions(dest_id, instr["content"])
-        bindings = self.store.get_binding_by_project(source_id)
+                await asyncio.to_thread(self.store.save_instructions, dest_id, instr["content"])
+        bindings = await asyncio.to_thread(self.store.get_binding_by_project, source_id)
         if bindings:
-            self.store.create_binding({
+            await asyncio.to_thread(self.store.create_binding, {
                 "project_id": dest_id,
                 "agent_id": bindings["agent_id"],
                 "merge_mode": bindings["merge_mode"],
             })
-        folders = self.store.list_folders(source_id)
+        folders = await asyncio.to_thread(self.store.list_folders, source_id)
         folder_id_map: dict[Optional[str], Optional[str]] = {}
         for f in folders:
             new_folder = self.store.create_folder({
@@ -329,7 +345,7 @@ class ProjectManager:
                 "sort_order": f.get("sort_order", 0),
             })
             folder_id_map[f["id"]] = new_folder["id"]
-        files = self.store.list_knowledge_files(source_id)
+        files = await asyncio.to_thread(self.store.list_knowledge_files, source_id)
         for kfile in files:
             old_path = Path(kfile["file_path"])
             folder_id = folder_id_map.get(kfile["folder_id"])
@@ -337,8 +353,15 @@ class ProjectManager:
             if folder_id:
                 dest_dir = dest_dir / folder_id
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest_name = kfile["original_name"] or old_path.name
-            dest_path = dest_dir / dest_name
+            raw_name = kfile["original_name"] or old_path.name
+            dest_name = Path(raw_name).name
+            if not dest_name or dest_name in (".", ".."):
+                logger.warning("skip unsafe dest_name in copy file=%s raw=%s", kfile["id"], raw_name)
+                continue
+            dest_path = (dest_dir / dest_name).resolve()
+            if not dest_path.is_relative_to(dest_dir.resolve()):
+                logger.warning("skip path traversal in copy file=%s raw=%s", kfile["id"], raw_name)
+                continue
             if dest_path.exists():
                 dest_path = dest_dir / f"{dest_path.stem}_{uuid.uuid4().hex[:8]}{dest_path.suffix}"
             if old_path.exists():
@@ -359,14 +382,14 @@ class ProjectManager:
                 except Exception as e:
                     logger.warning("re-index failed file=%s dest=%s err=%s (left PENDING)", new_file["id"], dest_id, e)
         if copy_chats:
-            chats = self.store.list_chats(source_id)
+            chats = await asyncio.to_thread(self.store.list_chats, source_id)
             for c in chats:
                 new_chat = self.store.create_chat({
                     "project_id": dest_id,
                     "title": c["title"],
                     "agent_id": c.get("agent_id"),
                 })
-                msgs = self.store.list_messages(c["id"])
+                msgs = await asyncio.to_thread(self.store.list_messages, c["id"])
                 for m in msgs:
                     self.store.create_message({
                         "chat_id": new_chat["id"],
