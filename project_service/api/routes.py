@@ -7,11 +7,12 @@ from fastapi.responses import Response, StreamingResponse
 
 from project_service import config
 from project_service.engine.agent_binder import AgentBinder
-from project_service.engine.chat_manager import ChatManager, ChatNotFound
-from project_service.engine.gateway_client import GatewayClient
+from project_service.engine.chat_manager import ChatError, ChatManager, ChatNotFound
+from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
+    KnowledgeError,
     KnowledgeFileNotFound,
     KnowledgeManager,
 )
@@ -394,7 +395,7 @@ async def get_chat(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.get_chat(chat_id)
+        return await cm.get_chat(chat_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -408,7 +409,7 @@ async def update_chat(
 ):
     try:
         fields = payload.model_dump(exclude_unset=True)
-        return await cm.update_chat(chat_id, fields)
+        return await cm.update_chat(chat_id, fields, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -421,7 +422,7 @@ async def star_chat(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.star_chat(chat_id, starred)
+        return await cm.star_chat(chat_id, starred, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -433,7 +434,7 @@ async def delete_chat(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        await cm.delete_chat(chat_id)
+        await cm.delete_chat(chat_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -447,7 +448,7 @@ async def fork_chat(
 ):
     try:
         label = payload.label if payload else None
-        return await cm.fork_chat(chat_id, label=label)
+        return await cm.fork_chat(chat_id, label=label, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -460,7 +461,7 @@ async def move_chat(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.move_chat(chat_id, payload.target_project_id)
+        return await cm.move_chat(chat_id, payload.target_project_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
     except ProjectNotFound:
@@ -474,7 +475,7 @@ async def detach_chat(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.detach_chat(chat_id)
+        return await cm.detach_chat(chat_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -489,7 +490,7 @@ async def create_chat_snapshot(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.create_snapshot(chat_id)
+        return await cm.create_snapshot(chat_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -501,7 +502,7 @@ async def list_chat_snapshots(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.list_snapshots(chat_id)
+        return await cm.list_snapshots(chat_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -514,7 +515,7 @@ async def restore_chat_snapshot(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.restore_snapshot(snapshot_id)
+        return await cm.restore_snapshot(snapshot_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="snapshot not found")
 
@@ -527,7 +528,7 @@ async def delete_chat_snapshot(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        await cm.delete_snapshot(snapshot_id)
+        await cm.delete_snapshot(snapshot_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="snapshot not found")
 
@@ -544,7 +545,7 @@ async def list_messages(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.list_messages(chat_id, limit=limit, offset=offset)
+        return await cm.list_messages(chat_id, limit=limit, offset=offset, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -557,7 +558,7 @@ async def add_message(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.add_message(chat_id, payload)
+        return await cm.add_message(chat_id, payload, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -570,7 +571,7 @@ async def delete_message(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        await cm.delete_message(message_id)
+        await cm.delete_message(message_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="message not found")
 
@@ -600,7 +601,7 @@ async def stream_message(
     gateway: GatewayClient = Depends(get_gateway_client),
 ):
     try:
-        await cm.add_message(chat_id, payload)
+        await cm.add_message(chat_id, payload, project_id=project_id)
 
         sys_prompt = ""
         try:
@@ -676,10 +677,14 @@ async def add_temp_attachment(
     try:
         return await cm.add_temp_attachment(
             chat_id, file_path, original_name,
-            file_size=file_size, mime_type=mime_type,
+            file_size=file_size, mime_type=mime_type, project_id=project_id,
         )
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
+    except ChatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KnowledgeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get(
@@ -692,7 +697,7 @@ async def list_temp_attachments(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        return await cm.list_temp_attachments(chat_id)
+        return await cm.list_temp_attachments(chat_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="chat not found")
 
@@ -708,7 +713,7 @@ async def delete_temp_attachment(
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
-        await cm.delete_temp_attachment(attachment_id)
+        await cm.delete_temp_attachment(attachment_id, project_id=project_id)
     except ChatNotFound:
         raise HTTPException(status_code=404, detail="temp attachment not found")
 
@@ -938,7 +943,7 @@ async def index_folder(
     rc: RAGCoordinator = Depends(get_rag_coordinator),
 ):
     try:
-        results = await rc.index_folder(folder_id)
+        results = await rc.index_folder(folder_id, project_id=project_id)
         return {"indexed": len(results), "results": results}
     except RAGError as e:
         raise HTTPException(status_code=400, detail=str(e))

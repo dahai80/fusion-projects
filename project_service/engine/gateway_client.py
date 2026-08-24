@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any, Optional
@@ -7,6 +8,15 @@ import httpx
 from project_service import config
 
 logger = logging.getLogger(__name__)
+
+
+class GatewayError(Exception):
+    pass
+
+
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_BASE = 0.4
 
 
 class GatewayClient:
@@ -39,25 +49,39 @@ class GatewayClient:
         *,
         json_data: Optional[dict] = None,
         params: Optional[dict] = None,
+        retries: int = _MAX_RETRIES,
     ) -> dict:
         url = f"{base_url}{path}"
-        try:
-            resp = await self._http.request(
-                method, url, json=json_data, params=params,
-                headers=self._auth_headers(),
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPStatusError as e:
-            logger.error("gateway %s %s -> %d: %s", method, url, e.response.status_code, e)
-            return {
-                "error": "http_error",
-                "status": e.response.status_code,
-                "detail": str(e),
-            }
-        except httpx.RequestError as e:
-            logger.error("gateway %s %s request error: %s", method, url, e)
-            return {"error": "request_error", "detail": str(e)}
+        last_exc: Optional[Exception] = None
+        last_status: Optional[int] = None
+        for attempt in range(retries + 1):
+            try:
+                resp = await self._http.request(
+                    method, url, json=json_data, params=params,
+                    headers=self._auth_headers(),
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as e:
+                last_status = e.response.status_code
+                last_exc = e
+                if e.response.status_code not in _RETRYABLE_STATUS:
+                    logger.error("gateway %s %s -> %d (non-retryable): %s", method, url, e.response.status_code, e)
+                    raise GatewayError(f"{method} {url} -> {e.response.status_code}: {e}") from e
+                logger.warning("gateway %s %s -> %d (retry %d/%d)", method, url, e.response.status_code, attempt + 1, retries)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_exc = e
+                logger.warning("gateway %s %s transient error (retry %d/%d): %s", method, url, attempt + 1, retries, e)
+            except httpx.RequestError as e:
+                last_exc = e
+                logger.error("gateway %s %s request error (non-retryable): %s", method, url, e)
+                raise GatewayError(f"{method} {url} request error: {e}") from e
+            if attempt < retries:
+                backoff = _RETRY_BACKOFF_BASE * (2 ** attempt)
+                await asyncio.sleep(backoff)
+        logger.error("gateway %s %s exhausted %d retries last_status=%s last_err=%s", method, url, retries, last_status, last_exc)
+        detail = f"status={last_status}" if last_status is not None else f"err={last_exc}"
+        raise GatewayError(f"{method} {url} failed after {retries} retries: {detail}")
 
     async def _health_check(self, url: str) -> bool:
         try:
@@ -167,16 +191,31 @@ class GatewayClient:
 
     async def artifacts_call(self, method: str, params: dict) -> dict:
         payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
-        try:
-            resp = await self._http.post(self._artifacts_url, json=payload, headers=self._auth_headers(), timeout=10.0)
-            resp.raise_for_status()
-            data = resp.json()
-        except httpx.HTTPStatusError as e:
-            logger.error("artifacts %s -> %d: %s", method, e.response.status_code, e)
-            return {"error": "http_error", "status": e.response.status_code, "detail": str(e)}
-        except httpx.RequestError as e:
-            logger.error("artifacts %s request error: %s", method, e)
-            return {"error": "request_error", "detail": str(e)}
-        if "error" in data:
-            return {"error": "rpc_error", "detail": data["error"]}
-        return data.get("result", {})
+        last_exc: Optional[Exception] = None
+        last_status: Optional[int] = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                resp = await self._http.post(self._artifacts_url, json=payload, headers=self._auth_headers(), timeout=10.0)
+                resp.raise_for_status()
+                data = resp.json()
+                if "error" in data:
+                    raise GatewayError(f"artifacts {method} rpc_error: {data['error']}")
+                return data.get("result", {})
+            except httpx.HTTPStatusError as e:
+                last_status = e.response.status_code
+                last_exc = e
+                if e.response.status_code not in _RETRYABLE_STATUS:
+                    logger.error("artifacts %s -> %d (non-retryable): %s", method, e.response.status_code, e)
+                    raise GatewayError(f"artifacts {method} -> {e.response.status_code}: {e}") from e
+                logger.warning("artifacts %s -> %d (retry %d/%d)", method, e.response.status_code, attempt + 1, _MAX_RETRIES)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_exc = e
+                logger.warning("artifacts %s transient error (retry %d/%d): %s", method, attempt + 1, _MAX_RETRIES, e)
+            except httpx.RequestError as e:
+                last_exc = e
+                logger.error("artifacts %s request error (non-retryable): %s", method, e)
+                raise GatewayError(f"artifacts {method} request error: {e}") from e
+            if attempt < _MAX_RETRIES:
+                await asyncio.sleep(_RETRY_BACKOFF_BASE * (2 ** attempt))
+        detail = f"status={last_status}" if last_status is not None else f"err={last_exc}"
+        raise GatewayError(f"artifacts {method} failed after {_MAX_RETRIES} retries: {detail}")

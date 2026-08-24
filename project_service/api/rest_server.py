@@ -44,17 +44,29 @@ def create_app(
             await gateway_client.close()
         except Exception as e:
             logger.error("gateway client close failed: %s", e)
+        logger.info("rest lifespan shutdown: closing project store")
+        try:
+            if pm_store is not None and hasattr(pm_store, "close"):
+                pm_store.close()
+        except Exception as e:
+            logger.error("project store close failed: %s", e)
 
-    app = FastAPI(title="Fusion-Projects", version="0.3.2", lifespan=lifespan)
-    store = getattr(project_manager, "store", None) if project_manager else None
-    pm = project_manager or ProjectManager(upstream=gateway_client)
-    pm_store = getattr(pm, "store", None) or store or ProjectStore()
+    app = FastAPI(title="Fusion-Projects", version="0.4.0", lifespan=lifespan)
+    injected_store = getattr(project_manager, "store", None) if project_manager else None
+    if project_manager is not None:
+        pm = project_manager
+    else:
+        pm = ProjectManager(upstream=gateway_client)
+    pm_store = injected_store or getattr(pm, "store", None)
+    if pm_store is None:
+        pm_store = ProjectStore()
     app.state.project_manager = pm
     app.state.instruction_engine = instruction_engine or InstructionEngine(
         store=pm_store, project_manager=pm
     )
     app.state.chat_manager = chat_manager or ChatManager(
-        store=pm_store, project_manager=pm
+        store=pm_store, project_manager=pm,
+        file_store=getattr(pm, "file_store", None),
     )
     rc = rag_coordinator or RAGCoordinator(
         store=pm_store, project_manager=pm, upstream=gateway_client

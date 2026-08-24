@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
-from project_service.engine.gateway_client import GatewayClient
+from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.models.artifact_ref import ArtifactRef
 from project_service.models.project import (
     Project,
@@ -154,9 +154,12 @@ class ProjectManager:
         logger.info("project deleted id=%s artifacts_cleared=%d", project_id, len(artifact_rows))
 
     async def _call_artifacts_engine(self, method: str, params: dict) -> dict:
-        result = await self.upstream.artifacts_call(method, params)
-        if not isinstance(result, dict) or "error" in result:
-            raise ProjectError(f"artifacts-engine error: {result}")
+        try:
+            result = await self.upstream.artifacts_call(method, params)
+        except GatewayError as e:
+            raise ProjectError(f"artifacts-engine error: {e}") from e
+        if not isinstance(result, dict):
+            raise ProjectError(f"artifacts-engine returned non-dict: {type(result).__name__}")
         return result
 
     async def migrate_artifact(
@@ -240,7 +243,6 @@ class ProjectManager:
 
     async def export_project(self, project_id: str) -> bytes:
         proj = await self.get(project_id)
-        await self.get(project_id)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("project.json", json.dumps(proj.model_dump(), ensure_ascii=False, indent=2))
@@ -337,8 +339,15 @@ class ProjectManager:
             if folder_id:
                 dest_dir = dest_dir / folder_id
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest_name = kfile["original_name"] or old_path.name
-            dest_path = dest_dir / dest_name
+            raw_name = kfile["original_name"] or old_path.name
+            dest_name = Path(raw_name).name
+            if not dest_name or dest_name in (".", ".."):
+                logger.warning("skip unsafe dest_name in copy file=%s raw=%s", kfile["id"], raw_name)
+                continue
+            dest_path = (dest_dir / dest_name).resolve()
+            if not dest_path.is_relative_to(dest_dir.resolve()):
+                logger.warning("skip path traversal in copy file=%s raw=%s", kfile["id"], raw_name)
+                continue
             if dest_path.exists():
                 dest_path = dest_dir / f"{dest_path.stem}_{uuid.uuid4().hex[:8]}{dest_path.suffix}"
             if old_path.exists():

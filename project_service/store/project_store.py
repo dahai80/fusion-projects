@@ -660,6 +660,8 @@ class ProjectStore:
             "id": sid,
             "chat_id": data["chat_id"],
             "title": data.get("title"),
+            "messages": data.get("messages", "[]"),
+            "instruction_snapshot_id": data.get("instruction_snapshot_id"),
             "message_count": data.get("message_count", 0),
             "agent_id": data.get("agent_id"),
             "created_at": now,
@@ -766,6 +768,43 @@ class ProjectStore:
         if deleted:
             logger.info("deleted message id=%s", message_id)
         return deleted > 0
+
+    def create_messages_batch(self, chat_id: str, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        now = _now()
+        payload = []
+        for r in rows:
+            mid = uuid.uuid4().hex
+            payload.append((
+                mid, chat_id, r["role"], r["content"],
+                r.get("rag_sources"), r.get("tool_calls"), r.get("token_usage"), now,
+            ))
+        sql = (
+            "INSERT INTO messages (id, chat_id, role, content, "
+            "rag_sources, tool_calls, token_usage, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        with self._cursor() as cur:
+            cur.executemany(sql, payload)
+        logger.info("batch inserted messages chat=%s count=%d", chat_id, len(payload))
+        return len(payload)
+
+    def replace_chat_messages(self, chat_id: str, rows: list[dict]) -> int:
+        with self._lock:
+            try:
+                cur = self._conn.cursor()
+                cur.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+                inserted = self.create_messages_batch(chat_id, rows)
+                cur.execute("UPDATE chats SET updated_at=? WHERE id=?", (_now(), chat_id))
+                self._conn.commit()
+                logger.info("replaced chat messages chat=%s count=%d", chat_id, inserted)
+                return inserted
+            except Exception:
+                self._conn.rollback()
+                raise
+            finally:
+                cur.close()
 
     # ── Knowledge Folder CRUD ──
 
@@ -1078,39 +1117,3 @@ class ProjectStore:
                 (project_id, limit, offset),
             )
             return [dict(r) for r in cur.fetchall()]
-
-    # ── Cowork tasks ──
-
-    def create_cowork_task(self, data: dict) -> dict:
-        with self._cursor() as cur:
-            row = dict(data)
-            cols = ", ".join(row.keys())
-            placeholders = ", ".join(["?"] * len(row))
-            cur.execute(
-                f"INSERT INTO cowork_tasks ({cols}) VALUES ({placeholders})",
-                list(row.values()),
-            )
-            logger.info("cowork_task created id=%s action=%s", data["id"], data["action"])
-            return row
-
-    def get_cowork_task(self, task_id: str) -> Optional[dict]:
-        with self._cursor() as cur:
-            cur.execute("SELECT * FROM cowork_tasks WHERE id=?", (task_id,))
-            r = cur.fetchone()
-            return dict(r) if r else None
-
-    def update_cowork_task(self, data: dict) -> dict:
-        with self._cursor() as cur:
-            sets = []
-            vals = []
-            for k, v in data.items():
-                if k != "id":
-                    sets.append(f"{k}=?")
-                    vals.append(v)
-            vals.append(data["id"])
-            cur.execute(
-                f"UPDATE cowork_tasks SET {', '.join(sets)} WHERE id=?",
-                vals,
-            )
-            cur.execute("SELECT * FROM cowork_tasks WHERE id=?", (data["id"],))
-            return dict(cur.fetchone())

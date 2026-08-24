@@ -97,7 +97,6 @@ class MessageCreate(BaseModel):
     role: str = "user"
     rag_mode: Optional[str] = None
     rag_scope: Optional[list[str]] = None
-    temp_file_ids: Optional[list[str]] = None
 
 
 class TempAttachment(BaseModel):

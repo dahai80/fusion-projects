@@ -66,6 +66,14 @@ def _validate_source(source_path: str) -> Path:
     return src
 
 
+def _sanitize_name(original_name: str) -> str:
+    safe = Path(original_name).name
+    if not safe or safe in (".", ".."):
+        logger.warning("rejected unsafe original_name: %s", original_name)
+        raise KnowledgeError(f"invalid original_name: {original_name}")
+    return safe
+
+
 class KnowledgeManager:
     def __init__(
         self,
@@ -213,7 +221,10 @@ class KnowledgeManager:
                 dest_dir = dest_dir / folder_id
         dest_dir.mkdir(parents=True, exist_ok=True)
         file_size = src.stat().st_size
-        dest_path = dest_dir / original_name
+        safe_name = _sanitize_name(original_name)
+        dest_path = (dest_dir / safe_name).resolve()
+        if not dest_path.is_relative_to(dest_dir.resolve()):
+            raise KnowledgeError("path traversal in original_name")
         if dest_path.exists():
             stem = dest_path.stem
             suffix = dest_path.suffix
@@ -225,7 +236,7 @@ class KnowledgeManager:
             project_id,
             folder_id=folder_id,
             name=name,
-            original_name=original_name,
+            original_name=safe_name,
             file_path=str(dest_path),
             file_size=file_size,
             mime_type=mime_type,

@@ -9,12 +9,13 @@ from pydantic import ValidationError
 
 from project_service import config
 from project_service.engine.agent_binder import AgentBinder, AgentBinderError
-from project_service.engine.chat_manager import ChatManager, ChatNotFound
-from project_service.engine.gateway_client import GatewayClient
+from project_service.engine.chat_manager import ChatError, ChatManager, ChatNotFound
+from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
     KnowledgeFileNotFound,
+    KnowledgeError,
     KnowledgeManager,
 )
 from project_service.engine.project_manager import (
@@ -59,16 +60,21 @@ class ProjectRPCServer:
         rag_coordinator: Optional[RAGCoordinator] = None,
         upstream: Optional[GatewayClient] = None,
     ) -> None:
-        store = ProjectStore()
         upstream = upstream or GatewayClient()
         self.gateway_client = upstream
-        self.project_manager = project_manager or ProjectManager(store=store, upstream=upstream)
+        if project_manager is None:
+            store = ProjectStore()
+            self.project_manager = ProjectManager(store=store, upstream=upstream)
+        else:
+            self.project_manager = project_manager
+            store = getattr(project_manager, "store", ProjectStore())
         pm_store = getattr(self.project_manager, "store", store)
         self.instruction_engine = instruction_engine or InstructionEngine(
             store=pm_store, project_manager=self.project_manager
         )
         self.chat_manager = chat_manager or ChatManager(
-            store=pm_store, project_manager=self.project_manager
+            store=pm_store, project_manager=self.project_manager,
+            file_store=getattr(self.project_manager, "file_store", None),
         )
         self.agent_binder = agent_binder or AgentBinder(
             store=pm_store, project_manager=self.project_manager, upstream=upstream
@@ -339,7 +345,6 @@ class ProjectRPCServer:
             role=params.get("role", "user"),
             rag_mode=params.get("rag_mode"),
             rag_scope=params.get("rag_scope"),
-            temp_file_ids=params.get("temp_file_ids"),
         )
         msg = await self.chat_manager.add_message(params["chat_id"], payload)
         return msg.model_dump()
@@ -356,7 +361,6 @@ class ProjectRPCServer:
             role=params.get("role", "user"),
             rag_mode=params.get("rag_mode"),
             rag_scope=params.get("rag_scope"),
-            temp_file_ids=params.get("temp_file_ids"),
         )
         await self.chat_manager.add_message(chat_id, payload)
 
@@ -590,7 +594,9 @@ class ProjectRPCServer:
         return result
 
     async def _rag_index_folder(self, params: Any) -> dict:
-        results = await self.rag_coordinator.index_folder(params["folder_id"])
+        results = await self.rag_coordinator.index_folder(
+            params["folder_id"], project_id=params.get("project_id")
+        )
         return {"indexed": len(results), "results": results}
 
     async def _rag_query(self, params: Any) -> dict:
@@ -743,16 +749,22 @@ class ProjectRPCServer:
             return _error(req_id, -32004, "artifact not found: " + str(e))
         except ChatNotFound as e:
             return _error(req_id, -32005, "chat not found: " + str(e))
+        except ChatError as e:
+            return _error(req_id, -32012, "chat error: " + str(e))
         except FolderNotFound as e:
             return _error(req_id, -32006, "folder not found: " + str(e))
         except KnowledgeFileNotFound as e:
             return _error(req_id, -32007, "knowledge file not found: " + str(e))
+        except KnowledgeError as e:
+            return _error(req_id, -32013, "knowledge error: " + str(e))
         except SnapshotNotFound as e:
             return _error(req_id, -32010, "snapshot not found: " + str(e))
         except AgentBinderError as e:
             return _error(req_id, -32008, "agent binder error: " + str(e))
         except RAGError as e:
             return _error(req_id, -32009, "rag error: " + str(e))
+        except GatewayError as e:
+            return _error(req_id, -32011, "gateway error: " + str(e))
         except ProjectError as e:
             return _error(req_id, -32000, "project error: " + str(e))
         except ValidationError as e:
@@ -821,6 +833,12 @@ class ProjectRPCServer:
                 await self.gateway_client.close()
             except Exception as e:
                 logger.error("gateway client close failed: %s", e)
+            try:
+                store = getattr(self.project_manager, "store", None)
+                if store is not None and hasattr(store, "close"):
+                    store.close()
+            except Exception as e:
+                logger.error("project store close failed: %s", e)
             logger.info("ProjectRPCServer stopped cleanly")
 
 

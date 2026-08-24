@@ -9,7 +9,7 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.3.2 — Claude Projects E2E chat assembly landed; production-hardened for public/internet deployment.**
+> **Status: v0.4.0 — adversarial audit fix pass complete (18 findings); production-hardened for public/internet deployment.**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
@@ -40,6 +40,25 @@ optional REST API.
 > oldest N, not newest N for the LLM history window); `knowledge_manager.upload_file`
 > re-reads the row after auto-index so the returned `index_status` reflects INDEXED,
 > not the stale PENDING.
+> **v0.4.0 — adversarial audit fix pass (18 findings, full report `audit-0824.md`):**
+> Security — `original_name` path-traversal sanitized (basename + resolve-within-dest
+> check) across knowledge upload, project copy, and temp attachments; temp-attachment
+> `file_path` now source-validated (`_validate_source`) before copy. IDOR — chat /
+> snapshot / message / temp-attachment + RAG folder ops thread `project_id` ownership
+> checks (REST boundary enforces; daemon/MCP keep single-user trust). Correctness —
+> `restore_snapshot` now actually restores messages (`replace_chat_messages`),
+> snapshot stores `messages` + `instruction_snapshot_id` (was dead columns),
+> `rag_mode/top_k/threshold` use `is not None` (0 no longer swallowed), `fork_chat`
+> batch-inserts with fresh ids. Architecture — `GatewayClient._request` /
+> `artifacts_call` retry 429/5xx/timeout with exponential backoff then raise
+> `GatewayError` (no more silent error-dict), mapped to JSON-RPC −32011; `daemon` /
+> `rest` reuse the injected manager's store (no orphan `ProjectStore()`) and close it
+> on shutdown. Perf/maint — rate-limiter bucket eviction (no unbounded `_hits`),
+> dead `cowork_tasks` methods + `temp_file_ids` field + duplicate `get()` removed.
+> JSON-RPC error codes extended: −32011 gateway, −32012 chat, −32013 knowledge.
+> 113 unit/integration tests green; live `chat_completions_stream` re-verified against
+> fusion-mlx (Qwen3.5-9B-4bit → PONG). 5 E2E tests need fusion-rag (11436), skipped
+> when that upstream is down.
 
 ## Layout
 

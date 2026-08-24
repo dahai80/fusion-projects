@@ -59,12 +59,14 @@ class _RateLimiter:
 
     def check(self, key: str) -> bool:
         now = time.monotonic()
-        bucket = self._hits[key]
+        bucket = self._hits.get(key, [])
         cutoff = now - self.window
-        self._hits[key] = [t for t in bucket if t > cutoff]
-        if len(self._hits[key]) >= self.limit:
+        fresh = [t for t in bucket if t > cutoff]
+        if len(fresh) >= self.limit:
+            self._hits[key] = fresh
             return False
-        self._hits[key].append(now)
+        fresh.append(now)
+        self._hits[key] = fresh
         return True
 
 

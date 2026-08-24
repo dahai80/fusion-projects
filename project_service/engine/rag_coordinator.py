@@ -3,7 +3,7 @@ import logging
 from typing import Optional
 
 from project_service import config
-from project_service.engine.gateway_client import GatewayClient
+from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
 from project_service.store.project_store import ProjectStore
 
@@ -40,9 +40,10 @@ class RAGCoordinator:
         if existing_kb_id:
             return existing_kb_id
         name = project.get("name", project_id) if project else project_id
-        create_result = await self.upstream.rag_create_kb(name=name, embedding_model=config.RAG_EMBEDDING_MODEL)
-        if create_result.get("error"):
-            raise RAGError(f"failed to create rag kb: {create_result.get('detail')}")
+        try:
+            create_result = await self.upstream.rag_create_kb(name=name, embedding_model=config.RAG_EMBEDDING_MODEL)
+        except GatewayError as e:
+            raise RAGError(f"failed to create rag kb: {e}") from e
         rag_kb_id = create_result.get("id")
         if not rag_kb_id:
             raise RAGError("rag kb created but no id returned")
@@ -56,15 +57,16 @@ class RAGCoordinator:
             raise RAGError(f"knowledge file not found: {file_id}")
         self.store.update_knowledge_file(file_id, {"index_status": "INDEXING"})
         kb_id = await self._ensure_kb(kfile["project_id"])
-        result = await self.upstream.rag_upload_doc(
-            kb_id=kb_id,
-            file_path=kfile["file_path"],
-            contextualize=True,
-        )
-        if "error" in result:
+        try:
+            result = await self.upstream.rag_upload_doc(
+                kb_id=kb_id,
+                file_path=kfile["file_path"],
+                contextualize=True,
+            )
+        except GatewayError as e:
             self.store.update_knowledge_file(file_id, {"index_status": "FAILED"})
-            logger.error("rag index failed file=%s error=%s", file_id, result.get("detail"))
-            return result
+            logger.error("rag index failed file=%s error=%s", file_id, e)
+            return {"error": "gateway_error", "detail": str(e)}
         doc_id = result.get("doc_id") or result.get("document_id")
         if doc_id:
             self.store.update_knowledge_file(file_id, {
@@ -76,10 +78,13 @@ class RAGCoordinator:
         logger.info("rag index complete file=%s doc=%s", file_id, doc_id)
         return result
 
-    async def index_folder(self, folder_id: str) -> list[dict]:
+    async def index_folder(self, folder_id: str, project_id: Optional[str] = None) -> list[dict]:
         folder = self.store.get_folder(folder_id)
         if not folder:
             raise RAGError(f"folder not found: {folder_id}")
+        if project_id is not None and folder["project_id"] != project_id:
+            logger.warning("index_folder ownership mismatch folder=%s folder_project=%s req_project=%s", folder_id, folder["project_id"], project_id)
+            raise RAGError(f"folder {folder_id} not in project {project_id}")
         files = self.store.list_knowledge_files(folder["project_id"], folder_id=folder_id)
         results = []
         for f in files:
@@ -102,9 +107,9 @@ class RAGCoordinator:
     ) -> dict:
         await self._ensure_project(project_id)
         project = self.store.get_project(project_id)
-        rag_mode = mode or project.get("rag_mode", "AUTO")
-        rag_top_k = top_k or project.get("rag_top_k", 5)
-        rag_threshold = threshold or project.get("rag_threshold", 0.65)
+        rag_mode = mode if mode is not None else project.get("rag_mode", "AUTO")
+        rag_top_k = top_k if top_k is not None else project.get("rag_top_k", 5)
+        rag_threshold = threshold if threshold is not None else project.get("rag_threshold", 0.65)
         if rag_mode == "MANUAL" and not folder_ids:
             logger.warning("MANUAL RAG mode but no folder_ids specified, returning empty")
             return {"results": [], "mode": rag_mode}
@@ -124,20 +129,28 @@ class RAGCoordinator:
         folder_prefix = None
         if folder_ids:
             storage_root = str(config.BASE_DIR)
+            for fid in folder_ids:
+                folder_row = self.store.get_folder(fid)
+                if not folder_row:
+                    raise RAGError(f"folder not found: {fid}")
+                if folder_row["project_id"] != project_id:
+                    logger.warning("query folder ownership mismatch folder=%s folder_project=%s req_project=%s", fid, folder_row["project_id"], project_id)
+                    raise RAGError(f"folder {fid} not in project {project_id}")
             first_folder = self.store.get_folder(folder_ids[0])
             if first_folder:
                 folder_prefix = f"{storage_root}/storage/{project_id}/knowledge/{folder_ids[0]}"
             if len(folder_ids) > 1:
                 logger.warning("folder_prefix only supports single folder, using first: %s", folder_ids[0])
-        result = await self.upstream.rag_search(
-            kb_id=kb_id,
-            query=query_text,
-            top_k=rag_top_k,
-            folder_prefix=folder_prefix,
-        )
-        if "error" in result:
-            logger.warning("rag query failed project=%s error=%s", project_id, result.get("detail"))
-            return result
+        try:
+            result = await self.upstream.rag_search(
+                kb_id=kb_id,
+                query=query_text,
+                top_k=rag_top_k,
+                folder_prefix=folder_prefix,
+            )
+        except GatewayError as e:
+            logger.warning("rag query failed project=%s error=%s", project_id, e)
+            return {"error": "gateway_error", "detail": str(e)}
         items = result if isinstance(result, list) else result.get("results", result.get("data", []))
         logger.info("rag query project=%s mode=%s results=%d", project_id, rag_mode, len(items))
         return {"results": items, "mode": rag_mode}
@@ -151,7 +164,11 @@ class RAGCoordinator:
             self.store.update_knowledge_file(file_id, {"index_status": "PENDING", "rag_doc_id": None})
             return {"status": "no_index"}
         kb_id = await self._ensure_kb(kfile["project_id"])
-        result = await self.upstream.rag_delete_doc(kb_id=kb_id, doc_id=doc_id)
+        try:
+            result = await self.upstream.rag_delete_doc(kb_id=kb_id, doc_id=doc_id)
+        except GatewayError as e:
+            logger.error("rag doc remove failed file=%s doc=%s error=%s", file_id, doc_id, e)
+            return {"error": "gateway_error", "detail": str(e)}
         self.store.update_knowledge_file(file_id, {"index_status": "PENDING", "rag_doc_id": None})
         logger.info("rag doc removed file=%s doc=%s", file_id, doc_id)
         return result
