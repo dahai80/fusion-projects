@@ -508,11 +508,20 @@ project defines no ruff config (do not invent one).
 cd ~/fusion/fusion-projects
 source .venv/bin/activate
 pip install -e ".[test]"          # refresh install after a pull
-./start.sh restart                 # UDS daemon (logs: logs/stdout.log, logs/stderr.log)
+./start.sh restart                 # UDS daemon
 curl -s http://127.0.0.1:11440/ready   # confirm deps green before serving traffic
 ```
-REST API auth is **off by default**. For any deployment that is not single-user
-localhost, set a key before start:
+Logs: the daemon rotates `~/.fusion-projects/logs/stdout.log` in-process
+(`FUSION_LOG_MAX_BYTES` default 50 MiB, `FUSION_LOG_BACKUP_COUNT` default 5).
+`start.sh` writes only pre-handler boot output to `logs/boot.log` (project-local);
+runtime logs live under the data dir, not next to `start.sh`.
+
+REST API auth is **off by default**. Two guards:
+- **Fail-fast bind guard**: if `FUSION_REST_API_KEY` is unset, `FUSION_REST_ALLOW_NO_AUTH`
+  is not set, **and** `FUSION_PROJECT_HOST` is a non-loopback address (e.g. `0.0.0.0`),
+  the REST server refuses to start (`RuntimeError`). Loopback binds (default
+  `127.0.0.1`) are allowed unauthenticated — single-user local-first is the design intent.
+- For any deployment beyond single-user localhost, set a key before start:
 ```bash
 export FUSION_REST_API_KEY="$(openssl rand -hex 32)"
 ./start.sh restart
@@ -522,6 +531,17 @@ startup warning downgrades from CRITICAL to a one-time WARNING:
 ```bash
 export FUSION_REST_ALLOW_NO_AUTH=1
 ```
+
+### Observability
+- `GET /metrics` — public (auth-exempt) JSON snapshot of in-process counters:
+  `total_requests`, `requests_by_status`, `rate_limit_rejected`, `auth_rejected`,
+  `body_oversize_rejected`, live `upstream_health` (gateway/rag/agent-studio),
+  `auth` state, and the active `rate_limit` (limit + window). No Prometheus
+  dependency — poll with `curl` or scrape into any collector.
+- Rate limit default: **60 requests / 60 s per IP** (`FUSION_REST_RATE_LIMIT`,
+  `FUSION_REST_RATE_WINDOW`), tuned for production. Override for higher throughput.
+- Per-module `logging` at INFO; `start.sh` / `rest_server.main()` attach
+  `RotatingFileHandler` to the root logger.
 
 ### Schema migration + rollback
 `ProjectStore` tracks schema via `PRAGMA user_version`; `SCHEMA_VERSION` is the
@@ -542,7 +562,42 @@ Roll back to a prior version (destructive — drops additive columns):
 schema change. Invalid targets (negative, or > current) raise `ValueError`. A
 forward re-run of `ProjectStore` initialization re-applies the up-migrations.
 
+## Known constraints (not defects)
+
+These are deliberate design boundaries or tracked-upstream items, not bugs in
+this service:
+
+- **Single-node, local-first** — one UDS daemon + one SQLite DB, no horizontal
+  scaling, no clustering. This matches the Fusion "一核九端" local-first
+  architecture: this service is a per-machine project asset container, not a
+  multi-tenant cloud service. Scaling out is out of scope; if a deployment needs
+  it, run one instance per node.
+- **Upstream fusion-mlx `DraftModelDecoder.config` 500** — chat completion with
+  model `Qwen3-0.6B-4bit` returns HTTP 500 from fusion-mlx (speculative-decoding
+  draft model missing `.config`). Tracked upstream: **dahai80/fusion-mlx#623**
+  (issue → PR → land per monorepo rule; not fixed here). Workaround: use a
+  confirmed-loaded chat model (`Qwen3.5-4B-bf16`, `Qwen3.5-9B-4bit`,
+  `Qwen3.8-27B-4bit`); `GatewayClient` surfaces upstream 5xx as `GatewayError`
+  → JSON-RPC −32011 / HTTP 502, so callers see a clear error, not a silent hang.
+
 ## Changelog
+
+### v0.4.4 — residual risk pass
+- **Auth-off bind guard**: REST server refuses to start (fail-fast `RuntimeError`)
+  when auth is off, unacknowledged, **and** bound to a non-loopback host. Loopback
+  stays allowed (local-first single-user). `config.rest_host_is_loopback()` helper.
+- **Log rotation conflict fixed**: `start.sh` no longer redirects to the same
+  `stdout.log` the in-process `RotatingFileHandler` owns (inode divergence on
+  rotation). Shell redirect now captures only pre-handler boot output to
+  `logs/boot.log`; runtime logs rotate under `~/.fusion-projects/logs/`.
+- **Portable start lock**: replaced `flock` (absent on macOS) with a `mkdir`-based
+  atomic lock, released on start success/failure and on stop.
+- **Rate-limit default tightened**: `FUSION_REST_RATE_LIMIT` 120 → 60 per 60 s
+  (production-safe, still generous for UI use).
+- **`GET /metrics`**: public JSON endpoint exposing request/status counters,
+  rate-limit/auth/body rejections, live upstream health, auth state, rate config.
+  New `project_service/metrics.py` (in-process, thread-safe, no Prometheus dep).
+- 148 tests passing (143 unit + 5 E2E integration).
 
 ### v0.4.3 — release-ops pass
 - **CI** (`.github/workflows/ci.yml`): Python 3.11/3.12 test matrix + `python -m

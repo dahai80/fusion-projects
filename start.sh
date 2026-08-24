@@ -7,8 +7,11 @@ cd "$SCRIPT_DIR"
 VENV_DIR="$SCRIPT_DIR/.venv"
 PID_FILE="$SCRIPT_DIR/.fusion-project-svc.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
-STDOUT_LOG="$LOG_DIR/stdout.log"
-STDERR_LOG="$LOG_DIR/stderr.log"
+# boot.log captures only pre-handler startup output (before the in-process
+# RotatingFileHandler attaches to stdout.log). The daemon owns stdout.log
+# rotation in-process (config.LOG_MAX_BYTES / LOG_BACKUP_COUNT); pointing the
+# shell redirect at the same file would collide on rotation (inode divergence).
+BOOT_LOG="$LOG_DIR/boot.log"
 ENTRY="python3 -m project_service.daemon_server"
 SOCK_PATH="${FUSION_PROJECT_SOCK:-/tmp/fusion-project-svc.sock}"
 
@@ -52,27 +55,26 @@ do_start() {
         # shellcheck disable=SC1091
         source "$VENV_DIR/bin/activate"
     fi
-    # flock guards against two start invocations racing to spawn a daemon.
-    # fd 9 held open by the daemon child inherits the lock; released on exit.
-    exec 9>"$PID_FILE.lock"
-    if ! flock -n 9; then
-        exec 9>&-
+    # mkdir-based atomic lock guards against two start invocations racing to
+    # spawn a daemon (portable: no flock dependency, works on macOS + Linux).
+    if ! mkdir "$PID_FILE.lock" 2>/dev/null; then
         echo "fusion-project-svc start lock held by another process, aborting" >&2
         return 1
     fi
     rm -f "$SOCK_PATH"
-    nohup $ENTRY >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
+    nohup $ENTRY >> "$BOOT_LOG" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     sleep 1
     if is_running; then
         echo "fusion-project-svc started (pid $pid, sock $SOCK_PATH)"
     else
-        echo "fusion-project-svc failed to start, see $STDERR_LOG" >&2
+        echo "fusion-project-svc failed to start, see $BOOT_LOG" >&2
         rm -f "$PID_FILE"
-        exec 9>&-
+        rmdir "$PID_FILE.lock" 2>/dev/null || true
         return 1
     fi
+    rmdir "$PID_FILE.lock" 2>/dev/null || true
 }
 
 do_stop() {
@@ -89,7 +91,8 @@ do_stop() {
         sleep 0.3
     done
     kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
-    rm -f "$PID_FILE" "$SOCK_PATH" "$PID_FILE.lock"
+    rm -f "$PID_FILE" "$SOCK_PATH"
+    rmdir "$PID_FILE.lock" 2>/dev/null || true
     exec 9>&- 2>/dev/null || true
     echo "fusion-project-svc stopped"
 }

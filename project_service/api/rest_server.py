@@ -40,7 +40,16 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        logger.info("rest lifespan startup auth=%s", "on" if config.REST_API_KEY else "off")
+        auth_on = bool(config.REST_API_KEY)
+        logger.info("rest lifespan startup auth=%s host=%s", "on" if auth_on else "off", config.REST_HOST)
+        if not auth_on and not config.rest_host_is_loopback() and not config.REST_ALLOW_NO_AUTH:
+            msg = (
+                "REFUSING to start: REST auth disabled (no FUSION_REST_API_KEY) and "
+                "bound to non-loopback host %s. Set FUSION_REST_API_KEY, or bind to "
+                "127.0.0.1, or set FUSION_REST_ALLOW_NO_AUTH=1 to acknowledge."
+            ) % config.REST_HOST
+            logger.critical(msg)
+            raise RuntimeError(msg)
         yield
         logger.info("rest lifespan shutdown: closing gateway client")
         try:
@@ -54,7 +63,7 @@ def create_app(
         except Exception as e:
             logger.error("project store close failed: %s", e)
 
-    app = FastAPI(title="Fusion-Projects", version="0.4.3", lifespan=lifespan)
+    app = FastAPI(title="Fusion-Projects", version="0.4.4", lifespan=lifespan)
     injected_store = getattr(project_manager, "store", None) if project_manager else None
     if project_manager is not None:
         pm = project_manager
@@ -118,6 +127,25 @@ def create_app(
             status_code=status_code,
             content={"status": "ready" if all_ok else "degraded", "deps": deps},
         )
+
+    @app.get("/metrics")
+    async def metrics_endpoint():
+        from project_service import metrics as metrics_mod
+        gw = app.state.gateway_client
+        gateway_ok, rag_ok, agent_ok = await asyncio.gather(
+            gw.gateway_is_healthy(),
+            gw.rag_is_healthy(),
+            gw.agent_studio_is_healthy(),
+        )
+        snap = metrics_mod.snapshot()
+        snap["upstream_health"] = {
+            "gateway": gateway_ok,
+            "rag": rag_ok,
+            "agent_studio": agent_ok,
+        }
+        snap["auth"] = "on" if config.REST_API_KEY else "off"
+        snap["rate_limit"] = {"limit": config.REST_RATE_LIMIT, "window_s": config.REST_RATE_WINDOW}
+        return JSONResponse(status_code=200, content=snap)
 
     logger.info("FastAPI app created")
     return app

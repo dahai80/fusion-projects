@@ -8,10 +8,11 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from project_service import config
+from project_service import metrics
 
 logger = logging.getLogger(__name__)
 
-_PUBLIC_PATHS = ("/health", "/ready", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
+_PUBLIC_PATHS = ("/health", "/ready", "/metrics", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
 
 
 def _extract_bearer(request: Request) -> str:
@@ -26,11 +27,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
     _warned_no_auth = False
 
     async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        response = await self._check(request, call_next)
+        metrics.record_request(path, response.status_code)
+        return response
+
+    async def _check(self, request: Request, call_next):
         if not config.REST_API_KEY:
             if not config.REST_ALLOW_NO_AUTH:
                 logger.critical(
                     "REST auth disabled and FUSION_REST_ALLOW_NO_AUTH not set — "
-                    "service running UNAUTHENTICATED. Set FUSION_REST_API_KEY or "
+                    "service running UNAUTHENTICATED (loopback only, non-loopback "
+                    "bind is refused at startup). Set FUSION_REST_API_KEY or "
                     "FUSION_REST_ALLOW_NO_AUTH=1 to acknowledge."
                 )
             elif not AuthMiddleware._warned_no_auth:
@@ -46,10 +54,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not token:
             client = request.client.host if request.client else "?"
             logger.warning("rest auth missing token path=%s client=%s", path, client)
+            metrics.record_auth_reject()
             return JSONResponse(status_code=401, content={"detail": "missing authorization"})
         if token != config.REST_API_KEY:
             client = request.client.host if request.client else "?"
             logger.warning("rest auth invalid token path=%s client=%s", path, client)
+            metrics.record_auth_reject()
             return JSONResponse(status_code=403, content={"detail": "invalid api key"})
         return await call_next(request)
 
@@ -59,6 +69,7 @@ class BodySizeMiddleware(BaseHTTPMiddleware):
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > config.REST_MAX_BODY_BYTES:
             logger.warning("rest body too large path=%s size=%s", request.url.path, cl)
+            metrics.record_body_oversize()
             return JSONResponse(status_code=413, content={"detail": "request body too large"})
         return await call_next(request)
 
@@ -123,5 +134,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             client = request.client.host if request.client else "unknown"
         if not _get_rate_limiter().check(client):
             logger.warning("rest rate limit exceeded client=%s path=%s", client, request.url.path)
+            metrics.record_rate_limit_reject()
             return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"})
         return await call_next(request)

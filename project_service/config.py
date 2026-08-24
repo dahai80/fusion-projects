@@ -9,6 +9,11 @@ SOCKET_MODE = int(os.environ.get("FUSION_PROJECT_SOCK_MODE", "0o600"), 8)
 REST_HOST = os.environ.get("FUSION_PROJECT_HOST", "127.0.0.1")
 REST_PORT = int(os.environ.get("FUSION_PROJECT_PORT", "11440"))
 
+
+def rest_host_is_loopback() -> bool:
+    host = REST_HOST.strip().lower()
+    return host in ("127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1", "[::1]")
+
 BASE_DIR = Path(os.environ.get("FUSION_PROJECT_HOME", str(Path.home() / ".fusion-projects")))
 DATA_DIR = BASE_DIR / "data"
 STORAGE_DIR = BASE_DIR / "storage"
@@ -48,7 +53,7 @@ GATEWAY_API_KEY = (
 )
 
 REST_MAX_BODY_BYTES = int(os.environ.get("FUSION_REST_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
-REST_RATE_LIMIT = int(os.environ.get("FUSION_REST_RATE_LIMIT", "120"))
+REST_RATE_LIMIT = int(os.environ.get("FUSION_REST_RATE_LIMIT", "60"))
 REST_RATE_WINDOW = float(os.environ.get("FUSION_REST_RATE_WINDOW", "60"))
 KNOWLEDGE_MAX_FILE_BYTES = int(os.environ.get("FUSION_KNOWLEDGE_MAX_FILE_BYTES", str(100 * 1024 * 1024)))
 UDS_MAX_LINE_BYTES = int(os.environ.get("FUSION_UDS_MAX_LINE_BYTES", str(16 * 1024 * 1024)))

@@ -178,7 +178,8 @@ def test_pid_identity_check_logic():
     import re
     script = open("start.sh").read()
     assert "project_service.daemon_server" in script
-    assert "flock -n" in script
+    # portable atomic lock: mkdir-based (no flock dependency, works on macOS + Linux).
+    assert 'mkdir "$PID_FILE.lock"' in script
     assert re.search(r"_pid_is_daemon", script)
 
 
