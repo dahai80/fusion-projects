@@ -15,6 +15,7 @@ class FakeUpstream:
     async def agent_list(self):
         return [
             {"id": "agent-1", "name": "Coder", "description": "code helper", "avatar": None},
+            {"id": "agent-2", "name": "Reviewer", "description": "review helper", "avatar": None},
         ]
 
     async def agent_get(self, agent_id):
@@ -27,6 +28,16 @@ class FakeUpstream:
                 "tools": ["read", "write"],
                 "rag_enabled": True,
                 "permissions": ["network"],
+            }
+        if agent_id == "agent-2":
+            return {
+                "id": "agent-2",
+                "name": "Reviewer",
+                "description": "review helper",
+                "avatar": None,
+                "tools": ["read"],
+                "rag_enabled": False,
+                "permissions": [],
             }
         return None
 
@@ -105,8 +116,9 @@ async def test_remove_chat_binding(binder, project_id):
 @pytest.mark.asyncio
 async def test_list_available_agents(binder):
     agents = await binder.list_available_agents()
-    assert len(agents) == 1
+    assert len(agents) == 2
     assert agents[0].name == "Coder"
+    assert agents[1].name == "Reviewer"
 
 
 @pytest.mark.asyncio

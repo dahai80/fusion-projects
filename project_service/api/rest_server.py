@@ -52,7 +52,7 @@ def create_app(
         except Exception as e:
             logger.error("project store close failed: %s", e)
 
-    app = FastAPI(title="Fusion-Projects", version="0.4.1", lifespan=lifespan)
+    app = FastAPI(title="Fusion-Projects", version="0.4.2", lifespan=lifespan)
     injected_store = getattr(project_manager, "store", None) if project_manager else None
     if project_manager is not None:
         pm = project_manager

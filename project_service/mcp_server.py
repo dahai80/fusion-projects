@@ -2,7 +2,19 @@ import json
 import logging
 from typing import Any, Awaitable, Callable, Optional
 
+from project_service import config
 from project_service.daemon_server import ProjectRPCServer
+from project_service.engine.agent_binder import AgentBinderError, AgentUnavailable
+from project_service.engine.chat_manager import ChatError, ChatNotFound
+from project_service.engine.knowledge_manager import (
+    FolderNotFound,
+    KnowledgeError,
+    KnowledgeFileNotFound,
+    KnowledgeQuotaExceeded,
+)
+from project_service.engine.project_manager import ProjectError, ProjectNotFound
+from project_service.engine.rag_coordinator import RAGError
+from project_service.engine.gateway_client import GatewayError
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +130,21 @@ MCP_TOOLS = [
 ]
 
 
+_MCP_DOMAIN_CODES = {
+    ProjectNotFound: (-32001, "project not found: "),
+    ChatNotFound: (-32005, "chat not found: "),
+    FolderNotFound: (-32006, "folder not found: "),
+    KnowledgeFileNotFound: (-32007, "knowledge file not found: "),
+    KnowledgeQuotaExceeded: (-32014, "quota exceeded: "),
+    KnowledgeError: (-32013, "knowledge error: "),
+    AgentUnavailable: (-32008, "agent unavailable: "),
+    AgentBinderError: (-32008, "agent binder error: "),
+    RAGError: (-32009, "rag error: "),
+    GatewayError: (-32011, "gateway error: "),
+    ProjectError: (-32000, "project error: "),
+}
+
+
 class MCPServer:
     def __init__(self, rpc_server: Optional[ProjectRPCServer] = None) -> None:
         self.rpc = rpc_server or ProjectRPCServer()
@@ -202,6 +229,25 @@ class MCPServer:
                 return _mcp_result(req_id, {
                     "content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
                 })
+            except (
+                ProjectNotFound,
+                ChatNotFound,
+                FolderNotFound,
+                KnowledgeFileNotFound,
+                KnowledgeQuotaExceeded,
+                KnowledgeError,
+                AgentUnavailable,
+                AgentBinderError,
+                RAGError,
+                GatewayError,
+                ProjectError,
+            ) as e:
+                code, prefix = _MCP_DOMAIN_CODES.get(type(e), (-32603, "error"))
+                logger.warning("MCP tool domain error tool=%s code=%s: %s", tool_name, code, e)
+                return _mcp_result(req_id, {
+                    "content": [{"type": "text", "text": json.dumps({"error": prefix + str(e)}, ensure_ascii=False)}],
+                    "isError": True,
+                })
             except Exception as e:
                 logger.exception("MCP tool failed tool=%s", tool_name)
                 return _mcp_result(req_id, {
@@ -249,11 +295,17 @@ async def run_mcp_stdio() -> None:
     _transport = asyncio.SafeStreamReaderProtocol(reader)
     loop.set_reader(sys.stdin.fileno(), _on_stdin_data)
 
+    max_bytes = config.MCP_MAX_LINE_BYTES
     try:
         while True:
             line = await reader.readline()
             if not line:
                 break
+            if len(line) > max_bytes:
+                logger.warning("mcp stdio line too large len=%d max=%d", len(line), max_bytes)
+                sys.stdout.buffer.write(_mcp_error(None, -32604, "request too large") + b"\n")
+                sys.stdout.buffer.flush()
+                continue
             resp = await server.handle_request(line)
             if resp:
                 sys.stdout.buffer.write(resp + b"\n")

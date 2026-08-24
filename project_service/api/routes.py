@@ -948,6 +948,8 @@ async def set_agent_binding(
         return await ab.set_binding(project_id, agent_id=agent_id, merge_mode=merge_mode, chat_id=chat_id)
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="project not found")
+    except AgentBinderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.delete("/projects/{project_id}/agent", status_code=204)

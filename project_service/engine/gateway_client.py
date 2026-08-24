@@ -185,9 +185,6 @@ class GatewayClient:
     async def agent_get(self, agent_id: str) -> dict:
         return await self._request(self._agent_url, "GET", f"/api/v1/agents/{agent_id}")
 
-    async def agent_execute(self, agent_id: str, payload: dict) -> dict:
-        return await self._request(self._agent_url, "POST", f"/api/v1/agents/{agent_id}/execute", json_data=payload)
-
     async def agent_studio_is_healthy(self) -> bool:
         return await self._health_check(f"{self._agent_url}/health")
 

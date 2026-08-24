@@ -9,7 +9,7 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.4.1 — availability pass complete; adversarial audit's 42/100 Blocked verdict fully addressed across all four layers (架构硬伤 H1-H7, 运行时风险 R1-R8, 工程实现缺陷 E1-E7, fix-blocks B1-B12).**
+> **Status: v0.4.2 — residual audit findings re-verified and closed (H6-item4 agent-bind validation, R4 dead `agent_execute`, MCP domain-error mapping, MCP stdio byte cap). Adversarial audit's 42/100 Blocked verdict fully addressed across all four layers.**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
@@ -93,6 +93,30 @@ optional REST API.
 > semaphore with a per-project KB-creation lock (no duplicate KB).
 > 125 tests passing (121 unit + 4 new H3 fan-out; 5 integration skipped when
 > fusion-rag/11436 down).
+
+> **v0.4.2 — residual audit re-verification (4 findings the v0.4.1 declaration
+> missed, found by re-checking every audit item against current code):**
+> **H6-item4** — `set_binding` now validates the agent exists upstream before
+> storing (`get_agent_preview` returns None on missing/empty upstream response →
+> raises `AgentUnavailable`, a previously-dead exception). `get_agent_preview` is
+> now None-safe (was `AttributeError` on falsy upstream return). Daemon maps
+> `AgentUnavailable` → −32008; REST `set_agent_binding` catches `AgentBinderError`
+> → 400 (was uncaught → 500).
+> **R4** — dead `GatewayClient.agent_execute` method removed (zero callers;
+> v0.4.1 README claimed removal but the method survived).
+> **MCP domain-error mapping (H2 drift point 3)** — `tools/call` no longer bare
+> stringifies domain exceptions. `ProjectNotFound`/`ChatNotFound`/
+> `FolderNotFound`/`KnowledgeFileNotFound`/`KnowledgeQuotaExceeded`/
+> `KnowledgeError`/`AgentUnavailable`/`AgentBinderError`/`RAGError`/`GatewayError`/
+> `ProjectError` map to typed `isError` results with matching code prefixes
+> (`_MCP_DOMAIN_CODES` table mirrors the daemon error-code registry).
+> **MCP stdio byte cap (R7)** — `run_mcp_stdio` now caps each request line at
+> `MCP_MAX_LINE_BYTES` (env `FUSION_MCP_MAX_LINE_BYTES`, default 16MB, mirrors
+> `UDS_MAX_LINE_BYTES`); oversize lines get a −32604 "request too large" error
+> and the loop continues (was unbounded — same attack surface as the pre-fix UDS
+> reader).
+> 133 tests passing (125 prior + 8 new in `tests/test_mcp_server.py`; 5
+> integration skipped when upstreams down).
 
 ## Layout
 
