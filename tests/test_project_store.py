@@ -1,4 +1,4 @@
-from project_service.store.project_store import ProjectStore
+from project_service.store.project_store import ProjectStore, SCHEMA_VERSION
 
 
 def test_create_and_get(store: ProjectStore):
@@ -73,3 +73,32 @@ def test_snapshots(store: ProjectStore):
     assert snap["label"] == "L"
     rows = store.list_snapshots(p["id"])
     assert len(rows) == 1
+
+
+def test_migrate_status_reports_version(store: ProjectStore):
+    st = store.migrate_status()
+    assert st["current_version"] == SCHEMA_VERSION
+    assert st["latest_version"] == SCHEMA_VERSION
+
+
+def test_migrate_down_rolls_back_additive_columns(store: ProjectStore):
+    import sqlite3
+    st = store.migrate_status()
+    assert st["current_version"] == SCHEMA_VERSION
+    result = store.migrate_down(SCHEMA_VERSION - 1)
+    assert result["rolled_to"] == SCHEMA_VERSION - 1
+    conn = sqlite3.connect(str(store.db_path))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(chat_snapshots)")}
+    conn.close()
+    assert "messages" not in cols
+    assert "instruction_snapshot_id" not in cols
+    st2 = store.migrate_status()
+    assert st2["current_version"] == SCHEMA_VERSION - 1
+
+
+def test_migrate_down_rejects_invalid_target(store: ProjectStore):
+    import pytest
+    with pytest.raises(ValueError):
+        store.migrate_down(SCHEMA_VERSION + 1)
+    with pytest.raises(ValueError):
+        store.migrate_down(-1)

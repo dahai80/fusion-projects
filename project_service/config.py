@@ -41,6 +41,7 @@ REST_API_KEY = (
     os.environ.get("FUSION_REST_API_KEY", "")
     or _read_secret_file(SECRET_FILE)
 )
+REST_ALLOW_NO_AUTH = os.environ.get("FUSION_REST_ALLOW_NO_AUTH", "") != ""
 GATEWAY_API_KEY = (
     os.environ.get("FUSION_GATEWAY_API_KEY", "")
     or os.environ.get("FUSION_MLX_API_KEY", "")

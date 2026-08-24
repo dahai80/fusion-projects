@@ -14,6 +14,12 @@ FUSION_MLX_API_KEY = os.environ.get("FUSION_E2E_MLX_API_KEY", "dahai168")
 INSTR_KEYWORD = "PINEAPPLE"
 KB_FACT = "The secret launch code is 7Z9-Q4K."
 
+# E2E chat model — must be a real loaded chat model on fusion-mlx (11434).
+# Override via FUSION_E2E_MODEL. Default Qwen3.5-4B-bf16 is a confirmed-loaded
+# text chat model. (Qwen3-0.6B-4bit triggers fusion-mlx DraftModelDecoder.config
+# AttributeError — upstream bug, tracked separately; do not use here.)
+E2E_MODEL = os.environ.get("FUSION_E2E_MODEL", "Qwen3.5-4B-bf16")
+
 
 def _upstreams_up() -> bool:
     import httpx
@@ -42,7 +48,7 @@ skip_no_upstream = pytest.mark.skipif(
 
 @pytest.fixture
 async def e2e_server(tmp_path):
-    # LLM goes direct to fusion-mlx (11434) so Qwen3-0.6B-4bit runs locally
+    # LLM goes direct to fusion-mlx (11434) so a real loaded model runs locally
     # (avoids gateway cloud-routing 502; still a real loaded model, no mock).
     # config.* are bound at import time, so set the module attrs directly
     # before constructing GatewayClient (which reads them in __init__).
@@ -103,7 +109,7 @@ async def test_e2e_instruction_injected(e2e_server):
         "chat_id": cid,
         "content": "Say hello.",
         "rag_mode": "OFF",
-        "model": "Qwen3-0.6B-4bit",
+        "model": E2E_MODEL,
         "max_tokens": 80,
     })
     content = result["message"]["content"]
@@ -130,7 +136,7 @@ async def test_e2e_rag_knowledge_injected(e2e_server, tmp_path):
         "chat_id": cid,
         "content": "What is the secret launch code? Answer using only the provided reference.",
         "rag_mode": "AUTO",
-        "model": "Qwen3-0.6B-4bit",
+        "model": E2E_MODEL,
         "max_tokens": 120,
     })
     content = result["message"]["content"]
@@ -161,7 +167,7 @@ async def test_e2e_instruction_plus_rag(e2e_server, tmp_path):
         "chat_id": cid,
         "content": "What is the secret launch code? Answer using only the provided reference.",
         "rag_mode": "AUTO",
-        "model": "Qwen3-0.6B-4bit",
+        "model": E2E_MODEL,
         "max_tokens": 120,
     })
     content = result["message"]["content"]
@@ -187,7 +193,7 @@ async def test_e2e_rag_mode_off_skips_knowledge(e2e_server, tmp_path):
         "chat_id": cid,
         "content": "What is the secret launch code?",
         "rag_mode": "OFF",
-        "model": "Qwen3-0.6B-4bit",
+        "model": E2E_MODEL,
         "max_tokens": 120,
     })
     content = result["message"]["content"]
@@ -214,7 +220,7 @@ async def test_e2e_history_limit_applied(e2e_server, monkeypatch):
         "chat_id": cid,
         "content": "Which words did I ask you to remember? List them.",
         "rag_mode": "OFF",
-        "model": "Qwen3-0.6B-4bit",
+        "model": E2E_MODEL,
         "max_tokens": 150,
     })
     content = result["message"]["content"]

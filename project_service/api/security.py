@@ -11,7 +11,7 @@ from project_service import config
 
 logger = logging.getLogger(__name__)
 
-_PUBLIC_PATHS = ("/health", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
+_PUBLIC_PATHS = ("/health", "/ready", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect")
 
 
 def _extract_bearer(request: Request) -> str:
@@ -23,9 +23,21 @@ def _extract_bearer(request: Request) -> str:
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    _warned_no_auth = False
+
     async def dispatch(self, request: Request, call_next):
         if not config.REST_API_KEY:
-            logger.debug("REST auth disabled (no REST_API_KEY configured)")
+            if not config.REST_ALLOW_NO_AUTH:
+                logger.critical(
+                    "REST auth disabled and FUSION_REST_ALLOW_NO_AUTH not set — "
+                    "service running UNAUTHENTICATED. Set FUSION_REST_API_KEY or "
+                    "FUSION_REST_ALLOW_NO_AUTH=1 to acknowledge."
+                )
+            elif not AuthMiddleware._warned_no_auth:
+                logger.warning(
+                    "REST auth disabled (FUSION_REST_ALLOW_NO_AUTH=1, acknowledged)"
+                )
+                AuthMiddleware._warned_no_auth = True
             return await call_next(request)
         path = request.url.path
         if path in _PUBLIC_PATHS or request.method == "OPTIONS":

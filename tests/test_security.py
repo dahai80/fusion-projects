@@ -17,6 +17,36 @@ async def test_rest_auth_disabled_when_no_key():
 
 
 @pytest.mark.asyncio
+async def test_auth_off_warns_critical_when_unacknowledged(monkeypatch, caplog):
+    monkeypatch.setattr(config, "REST_API_KEY", "")
+    monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", False)
+    from project_service.api import security
+    security.AuthMiddleware._warned_no_auth = False
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    with caplog.at_level("CRITICAL"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.get("/api/v1/projects")
+    assert any("UNAUTHENTICATED" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_auth_off_warns_once_when_acknowledged(monkeypatch, caplog):
+    monkeypatch.setattr(config, "REST_API_KEY", "")
+    monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", True)
+    from project_service.api import security
+    security.AuthMiddleware._warned_no_auth = False
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    with caplog.at_level("WARNING"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.get("/api/v1/projects")
+            await client.get("/api/v1/projects")
+    warnings = [rec for rec in caplog.records if "acknowledged" in rec.message]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
 async def test_rest_auth_rejects_missing_token(monkeypatch):
     monkeypatch.setattr(config, "REST_API_KEY", "secret123")
     app = create_app()

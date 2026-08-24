@@ -9,7 +9,7 @@ Agent. This service owns project metadata, instructions, and storage layout,
 and exposes both a UDS JSON-RPC daemon (for Fusion desktop/agent callers) and an
 optional REST API.
 
-> **Status: v0.4.2 — residual audit findings re-verified and closed (H6-item4 agent-bind validation, R4 dead `agent_execute`, MCP domain-error mapping, MCP stdio byte cap). Adversarial audit's 42/100 Blocked verdict fully addressed across all four layers.**
+> **Status: v0.4.3 — release-ops pass: CI (GitHub Actions matrix), deep `/ready` health (dependency fan-out), migration rollback (`migrate.status`/`migrate.down` RPC), auth-off made visible (loud warning not silent), E2E chat verified against live upstreams. Adversarial audit's 42/100 Blocked verdict fully addressed across all four layers + release operations.**
 > Full project CRUD, instructions + snapshots, knowledge base folders/files,
 > chat sessions + fork + move + detach, agent binding, RAG indexing + search,
 > audit log, MCP server, and full project export are implemented and green.
@@ -484,3 +484,91 @@ the real `~/.fusion-projects` is never touched.
 - `logger = logging.getLogger(__name__)` per module; `logging.basicConfig` only in
   entry points.
 - 4-space indentation, no docstrings.
+
+## Release operations (v0.4.3)
+
+### CI
+`.github/workflows/ci.yml` runs on push (branches `master`, `fix/**`) and pull
+request to `master`. The **test** job runs `pytest tests/ -v` on a Python 3.11
++ 3.12 matrix and uploads the report artifact; the **build** job (needs test)
+runs `python -m build` and uploads the `dist/` artifact. No lint job — this
+project defines no ruff config (do not invent one).
+
+### Health checks
+- `GET /health` — liveness, always 200 `{"status":"ok"}` (no dependency probe).
+- `GET /ready` — **readiness**. Fans out to all three upstreams concurrently
+  (`asyncio.gather`): `gateway_is_healthy` (11432), `rag_is_healthy` (11436),
+  `agent_studio_is_healthy` (11455). Returns `200 {"status":"ready","deps":{...}}`
+  when all reachable, else `503 {"status":"degraded","deps":{...}}` naming which
+  dependency is down. `/ready` is a public path (auth-exempt) so load balancers
+  and orchestrators can probe it without credentials.
+
+### Deploy
+```bash
+cd ~/fusion/fusion-projects
+source .venv/bin/activate
+pip install -e ".[test]"          # refresh install after a pull
+./start.sh restart                 # UDS daemon (logs: logs/stdout.log, logs/stderr.log)
+curl -s http://127.0.0.1:11440/ready   # confirm deps green before serving traffic
+```
+REST API auth is **off by default**. For any deployment that is not single-user
+localhost, set a key before start:
+```bash
+export FUSION_REST_API_KEY="$(openssl rand -hex 32)"
+./start.sh restart
+```
+If you intentionally run unauthenticated (local dev only), acknowledge it so the
+startup warning downgrades from CRITICAL to a one-time WARNING:
+```bash
+export FUSION_REST_ALLOW_NO_AUTH=1
+```
+
+### Schema migration + rollback
+`ProjectStore` tracks schema via `PRAGMA user_version`; `SCHEMA_VERSION` is the
+latest. Every additive migration must add a matching `_ROLLBACK_SQL[v]` entry.
+
+Check current state (UDS RPC, or `store.migrate_status()` directly):
+```jsonc
+// rpc: migrate.status
+{"current_version": 2, "latest_version": 2, "rollbackable_versions": [2, 1]}
+```
+
+Roll back to a prior version (destructive — drops additive columns):
+```jsonc
+// rpc: migrate.down
+{"target_version": 1, "confirm": "rollback-schema"}
+```
+`confirm` must equal the literal `rollback-schema` to acknowledge the destructive
+schema change. Invalid targets (negative, or > current) raise `ValueError`. A
+forward re-run of `ProjectStore` initialization re-applies the up-migrations.
+
+## Changelog
+
+### v0.4.3 — release-ops pass
+- **CI** (`.github/workflows/ci.yml`): Python 3.11/3.12 test matrix + `python -m
+  build` job; runs on push to `master`/`fix/**` and PRs to `master`.
+- **REST `/ready`**: deep readiness probe — concurrent fan-out to gateway/rag/
+  agent-studio, `200` ready / `503` degraded with per-dependency status.
+- **Migration rollback**: `migrate.status` + `migrate.down` RPC handlers; store
+  `migrate_down(target)` with `_ROLLBACK_SQL` per-version SQL, `confirm` guard.
+- **Auth-off visibility**: when `REST_API_KEY` unset and `FUSION_REST_ALLOW_NO_AUTH`
+  not set, `AuthMiddleware` logs CRITICAL `UNAUTHENTICATED` on every request;
+  acknowledged mode warns once. `REST_ALLOW_NO_AUTH` config knob added.
+- **E2E chat verified**: 5 integration tests run against live fusion-mlx (11434),
+  fusion-rag (11436), fusion-gateway (11432) — instruction injection, RAG
+  knowledge injection, instruction+RAG, RAG-off skip, history limit all green.
+  E2E model switched to `Qwen3.5-4B-bf16` (env `FUSION_E2E_MODEL`); the prior
+  `Qwen3-0.6B-4bit` hit upstream fusion-mlx `DraftModelDecoder.config` bug
+  (filed dahai80/fusion-mlx#623).
+- 145 tests passing (140 unit + 5 E2E integration).
+
+### v0.4.2 — residual audit re-verify
+- H6-item4: `AgentBinder.set_binding` validates agent exists upstream before
+  storing (rejects binding to a missing agent → `AgentUnavailable`).
+- R4: removed dead `GatewayClient.agent_execute` (zero callers).
+- MCP `tools/call` maps domain exceptions to typed `isError` results via
+  `_MCP_DOMAIN_CODES` (mirrors the daemon error registry).
+- MCP stdio loop enforces `FUSION_MCP_MAX_LINE_BYTES` cap (default 16 MiB),
+  replies `-32604` on oversized requests instead of crashing.
+- 133 tests passing.
+

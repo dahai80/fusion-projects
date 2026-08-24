@@ -215,6 +215,27 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# schema version tracked via PRAGMA user_version. bump when a _migrate_* runs.
+# down-migrations (_ROLLBACK_SQL) restore the prior shape; for additive-only
+# changes the safe rollback is restoring the pre-migration SQLite file backup.
+SCHEMA_VERSION = 2
+
+_ROLLBACK_SQL: dict[int, list[str]] = {
+    2: [
+        # _migrate_snapshots added chat_snapshots.messages + instruction_snapshot_id.
+        # rollback: drop the added columns (SQLite >= 3.35 supports DROP COLUMN).
+        "ALTER TABLE chat_snapshots DROP COLUMN instruction_snapshot_id",
+        "ALTER TABLE chat_snapshots DROP COLUMN messages",
+    ],
+    1: [
+        # _migrate_chat_project_id_nullable made chats.project_id nullable.
+        # rollback not safely expressible (re-adding NOT NULL can fail on
+        # existing NULLs); documented recovery is file-restore. left empty as
+        # a marker so migrate_status reports it as non-rollbackable.
+    ],
+}
+
+
 class ProjectStore:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = Path(db_path) if db_path else config.DB_PATH
@@ -235,6 +256,11 @@ class ProjectStore:
             self._conn.commit()
             self._migrate_chat_project_id_nullable()
             self._migrate_snapshots()
+            cur = self._conn.execute("PRAGMA user_version")
+            current = cur.fetchone()[0]
+            if current < SCHEMA_VERSION:
+                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                logger.info("schema user_version set %d -> %d", current, SCHEMA_VERSION)
 
     def _migrate_chat_project_id_nullable(self) -> None:
         with self._lock:
@@ -287,6 +313,48 @@ class ProjectStore:
                     "ALTER TABLE chat_snapshots ADD COLUMN instruction_snapshot_id TEXT"
                 )
                 self._conn.commit()
+
+    def migrate_status(self) -> dict:
+        with self._lock:
+            cur = self._conn.execute("PRAGMA user_version")
+            current = cur.fetchone()[0]
+        rollbackable = {
+            v: bool(stmts) for v, stmts in _ROLLBACK_SQL.items()
+        }
+        return {
+            "current_version": current,
+            "latest_version": SCHEMA_VERSION,
+            "rollbackable_versions": rollbackable,
+        }
+
+    def migrate_down(self, target_version: int) -> dict:
+        cur_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if target_version < 0 or target_version > cur_version:
+            raise ValueError(
+                f"invalid rollback target {target_version} from {cur_version} "
+                f"(must be 0..{cur_version})"
+            )
+        applied: list[str] = []
+        with self._lock:
+            for v in range(cur_version, target_version, -1):
+                stmts = _ROLLBACK_SQL.get(v, [])
+                if not stmts:
+                    logger.warning(
+                        "migrate_down v%d has no SQL rollback — restore from "
+                        "pre-migration SQLite file backup to fully revert", v
+                    )
+                for stmt in stmts:
+                    try:
+                        self._conn.execute(stmt)
+                        applied.append(stmt)
+                    except sqlite3.OperationalError as e:
+                        logger.error("migrate_down v%d stmt failed: %s — %s", v, stmt, e)
+                        self._conn.rollback()
+                        raise
+                self._conn.execute(f"PRAGMA user_version = {v - 1}")
+                logger.info("migrate_down v%d -> v%d", v, v - 1)
+            self._conn.commit()
+        return {"rolled_to": target_version, "applied": applied}
 
     @contextmanager
     def _cursor(self) -> Iterator[sqlite3.Cursor]:

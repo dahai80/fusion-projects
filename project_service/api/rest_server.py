@@ -1,9 +1,11 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from project_service import config
 from project_service.api.routes import router
@@ -52,7 +54,7 @@ def create_app(
         except Exception as e:
             logger.error("project store close failed: %s", e)
 
-    app = FastAPI(title="Fusion-Projects", version="0.4.2", lifespan=lifespan)
+    app = FastAPI(title="Fusion-Projects", version="0.4.3", lifespan=lifespan)
     injected_store = getattr(project_manager, "store", None) if project_manager else None
     if project_manager is not None:
         pm = project_manager
@@ -99,6 +101,23 @@ def create_app(
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": "fusion-project-svc", "auth": "on" if config.REST_API_KEY else "off"}
+
+    @app.get("/ready")
+    async def ready():
+        gw = app.state.gateway_client
+        gateway_ok, rag_ok, agent_ok = await asyncio.gather(
+            gw.gateway_is_healthy(),
+            gw.rag_is_healthy(),
+            gw.agent_studio_is_healthy(),
+        )
+        deps = {"gateway": gateway_ok, "rag": rag_ok, "agent_studio": agent_ok}
+        all_ok = gateway_ok and rag_ok and agent_ok
+        logger.info("ready check gateway=%s rag=%s agent=%s", gateway_ok, rag_ok, agent_ok)
+        status_code = 200 if all_ok else 503
+        return JSONResponse(
+            status_code=status_code,
+            content={"status": "ready" if all_ok else "degraded", "deps": deps},
+        )
 
     logger.info("FastAPI app created")
     return app

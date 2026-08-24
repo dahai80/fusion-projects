@@ -164,6 +164,8 @@ class ProjectRPCServer:
             "rpc_methods": self._rpc_list,
             "tools/list": self._tools_list,
             "health": self._ping,
+            "migrate.status": self._migrate_status,
+            "migrate.down": self._migrate_down,
         }
 
     # ── Project handlers ──
@@ -708,6 +710,22 @@ class ProjectRPCServer:
         for method in sorted(self._handlers.keys()):
             tools.append({"name": method, "description": method})
         return {"tools": tools}
+
+    async def _migrate_status(self, params: Any) -> dict:
+        return self.project_manager.store.migrate_status()
+
+    async def _migrate_down(self, params: Any) -> dict:
+        params = params or {}
+        target = int(params.get("target_version", 0))
+        confirm = params.get("confirm")
+        expected = "rollback-schema"
+        if confirm != expected:
+            raise ValueError(
+                f"migrate.down requires confirm='{expected}' to acknowledge "
+                f"destructive schema rollback to v{target}"
+            )
+        logger.warning("migrate_down invoked target_version=%d", target)
+        return self.project_manager.store.migrate_down(target)
 
     # ── Export handler ──
 

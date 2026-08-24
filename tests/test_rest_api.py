@@ -25,6 +25,33 @@ async def test_health(client):
     assert r.json()["status"] == "ok"
 
 
+async def test_ready_returns_503_when_upstreams_down(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    app = client._transport.app
+    gc = app.state.gateway_client
+    monkeypatch.setattr(gc, "gateway_is_healthy", AsyncMock(return_value=False))
+    monkeypatch.setattr(gc, "rag_is_healthy", AsyncMock(return_value=False))
+    monkeypatch.setattr(gc, "agent_studio_is_healthy", AsyncMock(return_value=False))
+    r = await client.get("/ready")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["status"] == "degraded"
+    assert set(body["deps"].keys()) == {"gateway", "rag", "agent_studio"}
+
+
+async def test_ready_returns_200_when_upstreams_up(client, monkeypatch):
+    from unittest.mock import AsyncMock
+    app = client._transport.app
+    gc = app.state.gateway_client
+    monkeypatch.setattr(gc, "gateway_is_healthy", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "rag_is_healthy", AsyncMock(return_value=True))
+    monkeypatch.setattr(gc, "agent_studio_is_healthy", AsyncMock(return_value=True))
+    r = await client.get("/ready")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ready"
+    assert all(r.json()["deps"].values())
+
+
 async def test_project_lifecycle(client):
     r = await client.post("/api/v1/projects", json={"name": "A", "description": "d"})
     assert r.status_code == 201
