@@ -688,6 +688,19 @@ async def stream_message(
                 assistant_content = "".join(collected)
                 if assistant_content and not disconnected:
                     await cm.add_message(chat_id, MessageCreate(role="assistant", content=assistant_content))
+                    if config.IDENTITY_USAGE_REPORT:
+                        try:
+                            from fusion_core.tenant import current as _tenant_current
+                            ctx = _tenant_current()
+                            if ctx and ctx.tenant_id:
+                                await gateway.identity_emit_usage(
+                                    ctx.tenant_id, "llm_tokens",
+                                    len(assistant_content.split()),
+                                    source="fusion-projects", model=model or None,
+                                    user_id=ctx.user_id,
+                                )
+                        except Exception as e:
+                            logger.warning("identity usage emit skipped: %s", e)
                 if not disconnected:
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 else:

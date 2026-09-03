@@ -582,6 +582,34 @@ this service:
 
 ## Changelog
 
+### v0.5.0 — fusion-identity multi-tenant integration
+- **Multi-tenant isolation**: REST surface is now identity-gated when
+  `FUSION_IDENTITY_SERVICE_TOKEN` is set. fusion-core `TenantMiddleware`
+  (fail-closed) replaces the legacy global-key `AuthMiddleware`: every
+  non-exempt request requires `X-Tenant-Id`; a Bearer JWT is verified
+  against fusion-identity `POST /api/v1/auth/verify`; `jwt.tid` must match
+  the header or the request is rejected with 401.
+- **Three red lines enforced**: (1) fail-closed — missing token/header →
+  401; (2) cross-tenant denied — `tid ↔ header ↔ row.tenant_id` mismatch
+  → 404/None; (3) data-isolation — `tenant_id TEXT NOT NULL DEFAULT ''`
+  column on `projects` (schema v2 → v3, `_migrate_tenant_id` migration +
+  rollback entry), stamped from `TenantContext` on create, filtered on
+  list, guarded on get/update/delete at the store layer (single chokepoint
+  covering all five managers).
+- **UDS daemon unchanged**: single-user trust model preserved — no tenant
+  middleware on the daemon; store enforcement is a no-op when no
+  `TenantContext` is set (contextvar empty).
+- **Usage reporting**: LLM token usage emitted to fusion-identity
+  `POST /api/v1/tenants/{tid}/usage` when `FUSION_IDENTITY_USAGE_REPORT=1`
+  and a tenant context is present.
+- **Config**: `FUSION_IDENTITY_URL` (default `http://127.0.0.1:11470`),
+  `FUSION_IDENTITY_SERVICE_TOKEN`, `FUSION_IDENTITY_VERIFY_TIMEOUT`,
+  `FUSION_IDENTITY_USAGE_REPORT`.
+- **Backward compatible**: with no identity token configured, REST keeps
+  the existing `AuthMiddleware` global-key gate — offline tests and
+  single-user deployments are unaffected. 153 tests green (143 prior +
+  10 new tenant-isolation tests).
+
 ### v0.4.5 — Python 3.12 import crash fix (CI green)
 - **Production blocker fixed**: `ProjectManager` defines `async def list(...)`,
   shadowing the builtin `list` in the class namespace. The annotations

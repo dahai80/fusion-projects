@@ -27,6 +27,11 @@ GATEWAY_URL = os.environ.get("FUSION_GATEWAY_URL", "http://127.0.0.1:11432")
 ARTIFACTS_URL = os.environ.get("FUSION_ARTIFACTS_URL", "http://127.0.0.1:8892")
 CHAT_HISTORY_LIMIT = int(os.environ.get("FUSION_CHAT_HISTORY_LIMIT", "50"))
 
+IDENTITY_URL = os.environ.get("FUSION_IDENTITY_URL", "http://127.0.0.1:11470")
+IDENTITY_SERVICE_TOKEN = os.environ.get("FUSION_IDENTITY_SERVICE_TOKEN", "")
+IDENTITY_VERIFY_TIMEOUT = float(os.environ.get("FUSION_IDENTITY_VERIFY_TIMEOUT", "2.0"))
+IDENTITY_USAGE_REPORT = os.environ.get("FUSION_IDENTITY_USAGE_REPORT", "") != ""
+
 SECRET_FILE = Path(os.environ.get("FUSION_PROJECT_SECRET_FILE", str(BASE_DIR / "secret.key")))
 
 

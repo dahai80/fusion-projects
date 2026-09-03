@@ -26,6 +26,8 @@ class GatewayClient:
         self._rag_url = config.RAG_BASE_URL
         self._agent_url = config.AGENT_STUDIO_URL
         self._artifacts_url = config.ARTIFACTS_URL
+        self._identity_url = config.IDENTITY_URL
+        self._identity_service_token = config.IDENTITY_SERVICE_TOKEN
         self._api_key = config.GATEWAY_API_KEY
         # per-upstream isolated pools so a long-lived gateway stream connection
         # cannot starve RAG/agent/artifacts requests (H3 fix). each pool capped
@@ -257,3 +259,41 @@ class GatewayClient:
                 await asyncio.sleep(_RETRY_BACKOFF_BASE * (2 ** attempt))
         detail = f"status={last_status}" if last_status is not None else f"err={last_exc}"
         raise GatewayError(f"artifacts {method} failed after {_MAX_RETRIES} retries: {detail}")
+
+    # ── fusion-identity (tenant registry + JWT issuer) ──
+    # verify is called from the sync verify_jwt callback inside TenantMiddleware,
+    # so it must stay synchronous (no await). a short local httpx.Client is fine.
+
+    def identity_verify_sync(self, token: str) -> dict:
+        if not self._identity_service_token:
+            raise GatewayError("identity service token not configured")
+        url = f"{self._identity_url}/api/v1/auth/verify"
+        headers = {"Authorization": f"Bearer {self._identity_service_token}"}
+        try:
+            with httpx.Client(timeout=config.IDENTITY_VERIFY_TIMEOUT) as client:
+                resp = client.post(url, json={"token": token}, headers=headers)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("identity verify %d: %s", e.response.status_code, e)
+            raise GatewayError(f"identity verify -> {e.response.status_code}") from e
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            logger.warning("identity verify error: %s", e)
+            raise GatewayError(f"identity verify error: {e}") from e
+
+    async def identity_emit_usage(self, tenant_id: str, metric: str, value: int, *, source: str = "fusion-projects", model: Optional[str] = None, user_id: Optional[str] = None) -> None:
+        if not self._identity_service_token:
+            return
+        url = f"{self._identity_url}/api/v1/tenants/{tenant_id}/usage"
+        headers = {"Authorization": f"Bearer {self._identity_service_token}"}
+        payload: dict[str, Any] = {"metric": metric, "value": value, "source": source}
+        if model:
+            payload["model"] = model
+        if user_id:
+            payload["user_id"] = user_id
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+        except Exception as e:
+            logger.warning("identity usage emit failed tenant=%s metric=%s err=%s", tenant_id, metric, e)

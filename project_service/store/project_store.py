@@ -11,6 +11,18 @@ from project_service import config
 
 logger = logging.getLogger(__name__)
 
+
+def _current_tenant_id() -> str:
+    # tenant enforcement is layered on the contextvar set by fusion-core
+    # TenantMiddleware. returns "" when no context (UDS single-user, offline
+    # tests, REST without identity configured) — "" disables enforcement.
+    try:
+        from fusion_core.tenant import current
+    except Exception:
+        return ""
+    ctx = current()
+    return ctx.tenant_id if ctx else ""
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -24,6 +36,7 @@ CREATE TABLE IF NOT EXISTS projects (
     rag_top_k INTEGER NOT NULL DEFAULT 5,
     rag_threshold REAL NOT NULL DEFAULT 0.65,
     kb_id TEXT,
+    tenant_id TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -218,9 +231,13 @@ def _now() -> str:
 # schema version tracked via PRAGMA user_version. bump when a _migrate_* runs.
 # down-migrations (_ROLLBACK_SQL) restore the prior shape; for additive-only
 # changes the safe rollback is restoring the pre-migration SQLite file backup.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _ROLLBACK_SQL: dict[int, list[str]] = {
+    3: [
+        # _migrate_tenant_id added projects.tenant_id. SQLite >= 3.35 DROP COLUMN.
+        "ALTER TABLE projects DROP COLUMN tenant_id",
+    ],
     2: [
         # _migrate_snapshots added chat_snapshots.messages + instruction_snapshot_id.
         # rollback: drop the added columns (SQLite >= 3.35 supports DROP COLUMN).
@@ -256,6 +273,7 @@ class ProjectStore:
             self._conn.commit()
             self._migrate_chat_project_id_nullable()
             self._migrate_snapshots()
+            self._migrate_tenant_id()
             cur = self._conn.execute("PRAGMA user_version")
             current = cur.fetchone()[0]
             if current < SCHEMA_VERSION:
@@ -311,6 +329,20 @@ class ProjectStore:
                 )
                 self._conn.execute(
                     "ALTER TABLE chat_snapshots ADD COLUMN instruction_snapshot_id TEXT"
+                )
+                self._conn.commit()
+
+    def _migrate_tenant_id(self) -> None:
+        with self._lock:
+            cur = self._conn.execute("PRAGMA table_info(projects)")
+            col_names = {c[1] for c in cur.fetchall()}
+            if "tenant_id" not in col_names:
+                logger.info("migrating projects: add tenant_id")
+                self._conn.execute(
+                    "ALTER TABLE projects ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id)"
                 )
                 self._conn.commit()
 
@@ -395,6 +427,7 @@ class ProjectStore:
             "rag_top_k": data.get("rag_top_k", config.DEFAULT_RAG_TOP_K),
             "rag_threshold": data.get("rag_threshold", config.DEFAULT_RAG_THRESHOLD),
             "kb_id": data.get("kb_id"),
+            "tenant_id": data.get("tenant_id", _current_tenant_id()),
             "created_at": now,
             "updated_at": now,
         }
@@ -405,7 +438,7 @@ class ProjectStore:
                 f"INSERT INTO projects ({cols}) VALUES ({placeholders})",
                 list(row.values()),
             )
-        logger.info("created project id=%s name=%s", pid, row["name"])
+        logger.info("created project id=%s name=%s tenant=%s", pid, row["name"], row["tenant_id"])
         return self.get_project(pid)
 
     def get_project(self, project_id: str) -> Optional[dict]:
@@ -417,7 +450,17 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute(sql, (project_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        tenant_id = _current_tenant_id()
+        if tenant_id and row.get("tenant_id", "") != tenant_id:
+            logger.warning(
+                "cross-tenant get denied project=%s row_tenant=%s ctx_tenant=%s",
+                project_id, row.get("tenant_id"), tenant_id,
+            )
+            return None
+        return row
 
     def list_projects(
         self,
@@ -426,6 +469,10 @@ class ProjectStore:
     ) -> list[dict]:
         clauses: list[str] = []
         params: list[Any] = []
+        tenant_id = _current_tenant_id()
+        if tenant_id:
+            clauses.append("p.tenant_id=?")
+            params.append(tenant_id)
         if not include_archived:
             clauses.append("p.is_archived=0")
         if only_starred:
@@ -443,6 +490,8 @@ class ProjectStore:
             return [dict(r) for r in cur.fetchall()]
 
     def update_project(self, project_id: str, fields: dict) -> Optional[dict]:
+        if self.get_project(project_id) is None:
+            return None
         clean = {k: v for k, v in fields.items() if k in ALLOWED_UPDATE_FIELDS and v is not None}
         if not clean:
             return self.get_project(project_id)
@@ -458,6 +507,8 @@ class ProjectStore:
         return self.get_project(project_id)
 
     def set_archived(self, project_id: str, archived: bool) -> Optional[dict]:
+        if self.get_project(project_id) is None:
+            return None
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE projects SET is_archived=?, updated_at=? WHERE id=?",
@@ -469,6 +520,8 @@ class ProjectStore:
         return self.get_project(project_id)
 
     def set_starred(self, project_id: str, starred: bool) -> Optional[dict]:
+        if self.get_project(project_id) is None:
+            return None
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE projects SET is_starred=?, updated_at=? WHERE id=?",
@@ -480,6 +533,8 @@ class ProjectStore:
         return self.get_project(project_id)
 
     def delete_project(self, project_id: str) -> bool:
+        if self.get_project(project_id) is None:
+            return False
         with self._cursor() as cur:
             cur.execute("DELETE FROM projects WHERE id=?", (project_id,))
             deleted = cur.rowcount
