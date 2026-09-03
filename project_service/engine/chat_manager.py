@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from project_service import config
 from project_service.engine.knowledge_manager import KnowledgeError, _sanitize_name, _validate_source
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
 from project_service.models.chat import (
@@ -140,9 +141,26 @@ class ChatManager:
             "fork_from_snapshot_id": snapshot.id,
         }
         row = self.store.create_chat(fork_data)
-        source_msgs = await asyncio.to_thread(self.store.list_messages, chat_id, limit=10000)
-        await asyncio.to_thread(self.store.create_messages_batch, row["id"], source_msgs)
-        logger.info("chat forked from=%s to=%s snapshot=%s msgs=%d", chat_id, row["id"], snapshot.id, len(source_msgs))
+        # paginated copy with a hard cap: avoid loading an entire very-long chat
+        # into memory + one giant batch insert. keep the most-recent cap messages.
+        cap = config.FORK_MAX_MESSAGES
+        total = await asyncio.to_thread(self.store.count_messages, chat_id)
+        truncated = max(0, total - cap)
+        page = 1000
+        offset = truncated
+        copied = 0
+        while offset < total:
+            batch = await asyncio.to_thread(
+                self.store.list_messages, chat_id, limit=page, offset=offset,
+            )
+            if not batch:
+                break
+            await asyncio.to_thread(self.store.create_messages_batch, row["id"], batch)
+            copied += len(batch)
+            offset += len(batch)
+        if truncated:
+            logger.warning("fork_chat truncated source=%s total=%d copied=%d dropped=%d", chat_id, total, copied, truncated)
+        logger.info("chat forked from=%s to=%s snapshot=%s msgs=%d (truncated=%d)", chat_id, row["id"], snapshot.id, copied, truncated)
         return Chat.from_row(row)
 
     async def create_snapshot(

@@ -63,7 +63,7 @@ def create_app(
         except Exception as e:
             logger.error("project store close failed: %s", e)
 
-    app = FastAPI(title="Fusion-Projects", version="0.5.2", lifespan=lifespan)
+    app = FastAPI(title="Fusion-Projects", version="0.6.0", lifespan=lifespan)
     injected_store = getattr(project_manager, "store", None) if project_manager else None
     if project_manager is not None:
         pm = project_manager
@@ -107,26 +107,35 @@ def create_app(
         # (fail-closed: missing X-Tenant-Id/invalid token -> 401). the legacy
         # global-key AuthMiddleware is replaced by per-tenant JWT verification
         # against fusion-identity /api/v1/auth/verify. BodySize + RateLimit stay.
+        from fusion_core.tenant import install_tenant_middleware
+        exempt = frozenset({
+            "/health", "/ready", "/metrics", "/docs", "/redoc",
+            "/openapi.json", "/docs/oauth2-redirect",
+        })
+
+        def _verify_jwt(token: str) -> dict:
+            return gateway_client.identity_verify_sync(token)
+
         try:
-            from fusion_core.tenant import install_tenant_middleware
-            exempt = frozenset({
-                "/health", "/ready", "/metrics", "/docs", "/redoc",
-                "/openapi.json", "/docs/oauth2-redirect",
-            })
-
-            def _verify_jwt(token: str) -> dict:
-                return gateway_client.identity_verify_sync(token)
-
             install_tenant_middleware(
                 app,
                 exempt_paths=exempt,
                 verify_jwt=_verify_jwt,
                 require_jwt=True,
             )
-            logger.info("tenant middleware installed (identity-gated multi-tenant mode)")
         except Exception as e:
-            logger.error("failed to install tenant middleware, falling back to AuthMiddleware: %s", e)
-            app.add_middleware(AuthMiddleware)
+            # fail-closed: identity-gated mode configured but middleware
+            # install failed -> do NOT silently fall back to global-key
+            # AuthMiddleware (that would bypass tenant isolation entirely).
+            # abort startup so operator notices instead of serving cross-tenant.
+            msg = (
+                "REFUSING to start: FUSION_IDENTITY_SERVICE_TOKEN set but "
+                "TenantMiddleware install failed: %s. Fix fusion-core/identity "
+                "config; do not degrade to global-key auth (cross-tenant leak)."
+            ) % e
+            logger.critical(msg)
+            raise RuntimeError(msg) from e
+        logger.info("tenant middleware installed (identity-gated multi-tenant mode)")
     else:
         app.add_middleware(AuthMiddleware)
     app.add_middleware(BodySizeMiddleware)

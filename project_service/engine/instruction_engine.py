@@ -66,6 +66,11 @@ class InstructionEngine:
         snap = self.store.get_snapshot(snapshot_id)
         if not snap:
             raise SnapshotNotFound(snapshot_id)
+        # ownership check: get_snapshot already runs assert_project_owned (returns
+        # None on tenant mismatch), but an explicit project_manager.get here makes
+        # the access check uniform with restore_snapshot and re-validates the
+        # project still exists before we mutate.
+        await self.project_manager.get(snap["project_id"])
         deleted = self.store.delete_snapshot(snapshot_id)
         logger.info("deleted instruction snapshot=%s deleted=%s", snapshot_id, deleted)
         return deleted

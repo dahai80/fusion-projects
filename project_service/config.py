@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,12 @@ CHAT_HISTORY_LIMIT = int(os.environ.get("FUSION_CHAT_HISTORY_LIMIT", "50"))
 IDENTITY_URL = os.environ.get("FUSION_IDENTITY_URL", "http://127.0.0.1:11470")
 IDENTITY_SERVICE_TOKEN = os.environ.get("FUSION_IDENTITY_SERVICE_TOKEN", "")
 IDENTITY_VERIFY_TIMEOUT = float(os.environ.get("FUSION_IDENTITY_VERIFY_TIMEOUT", "2.0"))
+# short TTL cache for verified JWTs: TenantMiddleware calls verify_jwt sync per
+# request, and VerifyJwt is a sync Callable (fusion-core contract) so the verify
+# HTTP call blocks the event-loop thread. caching verified tokens for a few
+# seconds cuts the blocking frequency dramatically for repeated requests. set 0
+# to disable.
+IDENTITY_VERIFY_CACHE_TTL = float(os.environ.get("FUSION_IDENTITY_VERIFY_CACHE_TTL", "5"))
 IDENTITY_USAGE_REPORT = os.environ.get("FUSION_IDENTITY_USAGE_REPORT", "") != ""
 
 SECRET_FILE = Path(os.environ.get("FUSION_PROJECT_SECRET_FILE", str(BASE_DIR / "secret.key")))
@@ -60,7 +67,19 @@ GATEWAY_API_KEY = (
 REST_MAX_BODY_BYTES = int(os.environ.get("FUSION_REST_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 REST_RATE_LIMIT = int(os.environ.get("FUSION_REST_RATE_LIMIT", "60"))
 REST_RATE_WINDOW = float(os.environ.get("FUSION_REST_RATE_WINDOW", "60"))
+# only trust X-Forwarded-For for rate-limit keying when explicitly behind a
+# trusted reverse proxy; default off so clients can't spoof the first hop.
+REST_TRUST_PROXY = os.environ.get("FUSION_REST_TRUST_PROXY", "") != ""
 KNOWLEDGE_MAX_FILE_BYTES = int(os.environ.get("FUSION_KNOWLEDGE_MAX_FILE_BYTES", str(100 * 1024 * 1024)))
+# comma-separated list of absolute directory prefixes that source_path imports
+# may read from. default empty = only the project's own storage dir is allowed.
+KNOWLEDGE_IMPORT_ROOTS = [
+    p.strip() for p in os.environ.get("FUSION_KNOWLEDGE_IMPORT_ROOTS", "").split(",") if p.strip()
+]
+# system temp dir is a permitted import root by default: browser/CLI uploads
+# stage files there before import. overridable to empty to forbid temp imports.
+TEMP_IMPORT_ROOT = str(Path(os.environ.get("FUSION_TEMP_IMPORT_ROOT", tempfile.gettempdir())).resolve())
+ALWAYS_INCLUDE_MAX_BYTES = int(os.environ.get("FUSION_ALWAYS_INCLUDE_MAX_BYTES", str(1 * 1024 * 1024)))
 UDS_MAX_LINE_BYTES = int(os.environ.get("FUSION_UDS_MAX_LINE_BYTES", str(16 * 1024 * 1024)))
 MCP_MAX_LINE_BYTES = int(os.environ.get("FUSION_MCP_MAX_LINE_BYTES", str(16 * 1024 * 1024)))
 WAL_AUTO_CHECKPOINT = int(os.environ.get("FUSION_WAL_AUTO_CHECKPOINT", "1000"))
@@ -70,6 +89,9 @@ KNOWLEDGE_PROJECT_QUOTA_BYTES = int(os.environ.get("FUSION_KNOWLEDGE_PROJECT_QUO
 KNOWLEDGE_GLOBAL_QUOTA_BYTES = int(os.environ.get("FUSION_KNOWLEDGE_GLOBAL_QUOTA", str(20 * 1024 * 1024 * 1024)))
 RATE_MAX_IPS = int(os.environ.get("FUSION_RATE_MAX_IPS", "10000"))
 EXPORT_INLINE_MAX_BYTES = int(os.environ.get("FUSION_EXPORT_INLINE_MAX_BYTES", str(64 * 1024 * 1024)))
+# cap messages dumped per chat in export_project. an unbounded dump of a chat
+# with 100k messages blows memory before the inline-size guard can fire.
+EXPORT_MAX_MESSAGES_PER_CHAT = int(os.environ.get("FUSION_EXPORT_MAX_MESSAGES_PER_CHAT", "5000"))
 EXPORT_CHUNK_BYTES = int(os.environ.get("FUSION_EXPORT_CHUNK_BYTES", str(512 * 1024)))
 GATEWAY_POOL_MAX_CONN = int(os.environ.get("FUSION_GATEWAY_POOL_MAX_CONN", "100"))
 GATEWAY_POOL_MAX_KEEPALIVE = int(os.environ.get("FUSION_GATEWAY_POOL_MAX_KEEPALIVE", "20"))
@@ -78,6 +100,11 @@ RAG_INDEX_CONCURRENCY = int(os.environ.get("FUSION_RAG_INDEX_CONCURRENCY", "4"))
 DEFAULT_RAG_MODE = "AUTO"
 DEFAULT_RAG_TOP_K = 5
 DEFAULT_RAG_THRESHOLD = 0.65
+RAG_MAX_TOP_K = int(os.environ.get("FUSION_RAG_MAX_TOP_K", "50"))
+# cap how many messages fork_chat copies into the new chat. an unbounded fork
+# of a 100k-message chat would load the entire history into memory + one giant
+# batch insert; cap it and warn-truncate beyond the cap.
+FORK_MAX_MESSAGES = int(os.environ.get("FUSION_FORK_MAX_MESSAGES", "5000"))
 DEFAULT_PROMPT_MERGE = "AGENT_FIRST"
 MAX_INSTRUCTION_CHARS = 10000
 

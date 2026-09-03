@@ -35,8 +35,8 @@ class KnowledgeQuotaExceeded(KnowledgeError):
     pass
 
 
-_SENSITIVE_DIRS = ("/etc", "/private/etc", "/System", "/usr")
-_SENSITIVE_NAMES = (".ssh", "secret.key", ".env", ".aws", ".gnupg")
+_SENSITIVE_DIRS = ("/etc", "/private/etc", "/System", "/usr", "/proc", "/sys")
+_SENSITIVE_NAMES = (".ssh", "secret.key", ".env", ".aws", ".gnupg", "id_rsa")
 
 
 def _is_under(path: Path, base: str) -> bool:
@@ -47,7 +47,12 @@ def _is_under(path: Path, base: str) -> bool:
         return False
 
 
-def _validate_source(source_path: str) -> Path:
+def _validate_source(source_path: str, project_id: Optional[str] = None) -> Path:
+    # allowlist model: a source file may only be read from the project's own
+    # storage dir, an explicitly configured import root, or the system temp dir
+    # (legitimate staging area for browser/CLI uploads). a denylist alone always
+    # misses a sensitive path, so the allowlist is the primary boundary; the
+    # sensitive-name/dir checks below are defense-in-depth on top of it.
     src = Path(source_path).resolve()
     if not src.exists():
         raise KnowledgeError(f"source file not found: {source_path}")
@@ -62,6 +67,14 @@ def _validate_source(source_path: str) -> Path:
         if bad in name_lower or bad in str(src).lower():
             logger.warning("rejected sensitive source name: %s", source_path)
             raise KnowledgeError("source path references a restricted file")
+    allowed_roots: list[str] = list(config.KNOWLEDGE_IMPORT_ROOTS)
+    allowed_roots.append(config.TEMP_IMPORT_ROOT)
+    if project_id:
+        allowed_roots.append(str(config.STORAGE_DIR / project_id / "knowledge"))
+    allowed = any(_is_under(src, root) for root in allowed_roots if root)
+    if not allowed:
+        logger.warning("rejected source path outside allowlist: %s", source_path)
+        raise KnowledgeError("source path is outside permitted import directories")
     size = src.stat().st_size
     if size > config.KNOWLEDGE_MAX_FILE_BYTES:
         raise KnowledgeError(
@@ -237,7 +250,7 @@ class KnowledgeManager:
         mime_type: Optional[str] = None,
     ) -> KnowledgeFile:
         await self._ensure_project(project_id)
-        src = _validate_source(source_path)
+        src = _validate_source(source_path, project_id=project_id)
         dest_dir = self.file_store.project_dir(project_id) / "knowledge"
         if folder_id:
             folder = self.store.get_folder(folder_id)
@@ -292,7 +305,7 @@ class KnowledgeManager:
         existing = self.store.get_knowledge_file(file_id)
         if not existing:
             raise KnowledgeFileNotFound(file_id)
-        src = _validate_source(source_path)
+        src = _validate_source(source_path, project_id=existing["project_id"])
         if self.rag_coordinator is not None:
             try:
                 await self.rag_coordinator.remove_file_index(file_id)

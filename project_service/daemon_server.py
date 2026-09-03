@@ -35,7 +35,7 @@ from project_service.models.instruction import InstructionSave
 from project_service.models.knowledge import FolderCreate, FolderUpdate
 from project_service.models.project import ProjectCreate, ProjectUpdate
 from project_service.models.audit import AuditLogEntry
-from project_service.store.project_store import ProjectStore
+from project_service.store.project_store import ProjectStore, FolderError
 
 try:
     from importlib.metadata import version as _pkg_version, PackageNotFoundError
@@ -377,10 +377,10 @@ class ProjectRPCServer:
                 logger.warning("build_system_prompt failed project=%s chat=%s err=%s", project_id, chat_id, e)
                 return ""
 
-        async def _build_rag_ctx() -> str:
+        async def _build_rag_ctx() -> tuple[str, list[dict]]:
             rag_mode = payload.rag_mode or config.DEFAULT_RAG_MODE
             if rag_mode == "OFF":
-                return ""
+                return "", []
             try:
                 rag_result = await self.rag_coordinator.query(
                     project_id,
@@ -390,19 +390,30 @@ class ProjectRPCServer:
                     chat_id=chat_id,
                 )
                 if isinstance(rag_result, dict) and "error" not in rag_result:
-                    return _format_rag_context(rag_result.get("results", []))
+                    ctx = _format_rag_context(rag_result.get("results", []))
+                    return ctx, rag_result.get("sources", [])
             except Exception as e:
                 logger.warning("rag query failed project=%s chat=%s err=%s", project_id, chat_id, e)
-            return ""
+            return "", []
 
-        sys_prompt, rag_ctx = await asyncio.gather(_build_sys_prompt(), _build_rag_ctx())
+        async def _build_always_include() -> tuple[str, list[dict]]:
+            try:
+                return await self.rag_coordinator.get_always_include_context(project_id)
+            except Exception as e:
+                logger.warning("always_include build failed project=%s err=%s", project_id, e)
+                return "", []
+
+        sys_prompt, (rag_ctx, rag_sources), (ai_ctx, ai_sources) = await asyncio.gather(
+            _build_sys_prompt(), _build_rag_ctx(), _build_always_include()
+        )
+        all_sources: list[dict] = ai_sources + rag_sources
 
         history = await asyncio.to_thread(
             self.chat_manager.store.list_messages, chat_id,
             limit=config.CHAT_HISTORY_LIMIT, keep_recent=True,
         )
         llm_messages = []
-        system_content = "\n\n".join(p for p in (sys_prompt, rag_ctx) if p).strip()
+        system_content = "\n\n".join(p for p in (sys_prompt, ai_ctx, rag_ctx) if p).strip()
         if system_content:
             llm_messages.append({"role": "system", "content": system_content})
         llm_messages += [{"role": m["role"], "content": m["content"]} for m in history]
@@ -413,33 +424,38 @@ class ProjectRPCServer:
         want_stream = bool(params.get("stream", False)) and emit is not None
         collected = []
         stream_error = None
-        async for chunk in self.gateway_client.chat_completions_stream(
-            llm_messages, model=model, temperature=temperature, max_tokens=max_tokens
-        ):
-            if "error" in chunk:
-                stream_error = chunk
-                logger.warning("chat stream error chunk project=%s chat=%s chunk=%s collected=%d", project_id, chat_id, chunk, len(collected))
-                break
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
-            token = delta.get("content", "")
-            if token:
-                collected.append(token)
-                if want_stream:
-                    try:
-                        await emit({"chat_id": chat_id, "delta": token})
-                    except Exception as e:
-                        logger.warning("stream emit failed chat=%s err=%s (continuing)", chat_id, e)
-                        want_stream = False
+        try:
+            async for chunk in self.gateway_client.chat_completions_stream(
+                llm_messages, model=model, temperature=temperature, max_tokens=max_tokens
+            ):
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                token = delta.get("content", "")
+                if token:
+                    collected.append(token)
+                    if want_stream:
+                        try:
+                            await emit({"chat_id": chat_id, "delta": token})
+                        except Exception as e:
+                            logger.warning("stream emit failed chat=%s err=%s (continuing)", chat_id, e)
+                            want_stream = False
+        except GatewayError as e:
+            stream_error = str(e)
+            logger.warning("chat stream error project=%s chat=%s err=%s collected=%d", project_id, chat_id, e, len(collected))
         assistant_content = "".join(collected)
         if not assistant_content:
             if stream_error is not None:
-                raise ProjectError("llm stream error: " + str(stream_error))
+                raise ProjectError("llm stream error: " + stream_error)
             raise ProjectError("llm returned empty content")
         if stream_error is not None:
             logger.warning("chat stream recovered partial reply len=%d after error=%s", len(assistant_content), stream_error)
         assistant_msg = await self.chat_manager.add_message(
             chat_id, MessageCreate(role="assistant", content=assistant_content)
         )
+        if all_sources:
+            try:
+                self.chat_manager.store.set_message_rag_sources(assistant_msg.id, json.dumps(all_sources, ensure_ascii=False))
+            except Exception as e:
+                logger.warning("rag_sources persist failed chat=%s err=%s", chat_id, e)
         if want_stream:
             try:
                 await emit({"chat_id": chat_id, "done": True})
@@ -733,6 +749,14 @@ class ProjectRPCServer:
                 f"migrate.down requires confirm='{expected}' to acknowledge "
                 f"destructive schema rollback to v{target}"
             )
+        # schema rollback is destructive data loss; gate behind an explicit env
+        # so production deployments (which never roll back schema) are not one
+        # RPC call away from wiping tables. offline/dev ops set the env to allow.
+        if os.environ.get("FUSION_PROJECT_ALLOW_DANGEROUS_MIGRATE", "") != "1":
+            raise ValueError(
+                "migrate.down disabled: set FUSION_PROJECT_ALLOW_DANGEROUS_MIGRATE=1 "
+                "to permit destructive schema rollback"
+            )
         logger.warning("migrate_down invoked target_version=%d", target)
         return self.project_manager.store.migrate_down(target)
 
@@ -839,6 +863,8 @@ class ProjectRPCServer:
             return _error(req_id, -32012, "chat error: " + str(e))
         except FolderNotFound as e:
             return _error(req_id, -32006, "folder not found: " + str(e))
+        except FolderError as e:
+            return _error(req_id, -32006, "folder error: " + str(e))
         except KnowledgeFileNotFound as e:
             return _error(req_id, -32007, "knowledge file not found: " + str(e))
         except KnowledgeQuotaExceeded as e:
@@ -870,9 +896,14 @@ class ProjectRPCServer:
     ) -> None:
         peer = writer.get_extra_info("peername")
         max_bytes = config.UDS_MAX_LINE_BYTES
+        read_timeout = float(os.environ.get("FUSION_UDS_READ_TIMEOUT", "60"))
         try:
             while True:
-                line = await reader.readline()
+                try:
+                    line = await asyncio.wait_for(reader.readline(), timeout=read_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning("uds readline timeout peer=%s after %ss", peer, read_timeout)
+                    break
                 if not line:
                     break
                 if len(line) > max_bytes:
@@ -893,10 +924,25 @@ class ProjectRPCServer:
 
     async def serve(self, sock_path: Optional[str] = None) -> None:
         sock_path = sock_path or config.SOCKET_PATH
+        # refuse to bind over a symlink: an attacker could point an existing
+        # socket path at a sensitive file and we'd truncate/replace it.
+        if os.path.islink(sock_path):
+            logger.critical("REFUSING to bind: socket path %s is a symlink (possible hijack)", sock_path)
+            raise RuntimeError(f"socket path {sock_path} is a symlink, refusing to bind")
         if os.path.exists(sock_path):
             os.remove(sock_path)
-        server = await asyncio.start_unix_server(self._client_cb, path=sock_path)
-        os.chmod(sock_path, config.SOCKET_MODE)
+        # bind with umask 0o077 so the socket is owner-only by construction,
+        # then also chmod to the configured mode (belt + suspenders). using a
+        # temp path + atomic rename avoids a race where the socket briefly
+        # exists with default (possibly world-readable) perms before chmod.
+        prev_umask = os.umask(0o077)
+        try:
+            tmp_path = sock_path + ".tmp." + uuid.uuid4().hex
+            server = await asyncio.start_unix_server(self._client_cb, path=tmp_path)
+            os.chmod(tmp_path, config.SOCKET_MODE)
+            os.rename(tmp_path, sock_path)
+        finally:
+            os.umask(prev_umask)
         logger.info("ProjectRPCServer listening on %s mode=%o", sock_path, config.SOCKET_MODE)
 
         stop_event = asyncio.Event()

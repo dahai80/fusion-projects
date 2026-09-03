@@ -93,13 +93,13 @@ class ChatMoveRequest(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1, max_length=200000)
     role: str = "user"
     rag_mode: Optional[str] = None
     rag_scope: Optional[list[str]] = None
     model: Optional[str] = None
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(None, ge=1, le=32768)
     stream: Optional[bool] = None
 
 

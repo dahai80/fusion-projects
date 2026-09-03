@@ -11,8 +11,8 @@ class ProjectCreate(BaseModel):
     default_agent_id: Optional[str] = None
     prompt_merge_mode: str = config.DEFAULT_PROMPT_MERGE
     rag_mode: str = config.DEFAULT_RAG_MODE
-    rag_top_k: int = config.DEFAULT_RAG_TOP_K
-    rag_threshold: float = config.DEFAULT_RAG_THRESHOLD
+    rag_top_k: int = Field(config.DEFAULT_RAG_TOP_K, ge=1, le=config.RAG_MAX_TOP_K)
+    rag_threshold: float = Field(config.DEFAULT_RAG_THRESHOLD, ge=0.0, le=1.0)
     kb_id: Optional[str] = None
     instructions: Optional[str] = None
     template_id: Optional[str] = None
@@ -24,8 +24,8 @@ class ProjectUpdate(BaseModel):
     default_agent_id: Optional[str] = None
     prompt_merge_mode: Optional[str] = None
     rag_mode: Optional[str] = None
-    rag_top_k: Optional[int] = None
-    rag_threshold: Optional[float] = None
+    rag_top_k: Optional[int] = Field(None, ge=1, le=config.RAG_MAX_TOP_K)
+    rag_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
     kb_id: Optional[str] = None
 
 

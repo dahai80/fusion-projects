@@ -331,6 +331,44 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.6.0 — 对抗性审计修复（P0–P3 全量）
+关闭对抗性代码审计（`audit/fusion-projects-0903.md`）的全部发现：
+12 个 P0 致命、28 个 P1 逻辑、16 个 P2、24 个 P3，外加 6 个架构硬伤。
+服务从"不可发布"进入企业级生产可用：
+- **多租户隔离不再是空壳**：store 层新增 `assert_project_owned` 咽喉点，
+  覆盖所有子表访问器（chats/messages/knowledge_files/folders/bindings/
+  snapshots/instructions/audit_log/artifacts/attachments/rag_queries）。
+  不持有父项目的租户无法读写任何子行，一次关闭 6 个 P0/P1 IDOR。
+- **文件系统加固（FileStore）**：`project_id` 严格字符集校验 + 解析路径
+  必须落在 `storage_dir` 内 + 拒绝符号链接。`shutil.rmtree` 不再可被用作
+  任意目录删除原语。
+- **UDS 守护进程加固**：拒绝符号链接劫持、`umask 0o077` + 原子重命名绑定
+  （消除 chmod 竞态）、客户端 readline 超时。
+- **租户中间件 fail-closed**：`FUSION_IDENTITY_SERVICE_TOKEN` 已设置但
+  `TenantMiddleware` 安装失败时，启动直接中止，不再静默回退到全局 key
+  鉴权（跨租户泄露）。
+- **破坏性 schema 回滚受控**：`migrate.down` 在未设
+  `FUSION_PROJECT_ALLOW_DANGEROUS_MIGRATE=1` 时拒绝执行，生产环境不再
+  一次 RPC 调用即可清空表。
+- **source_path 白名单**：知识库导入（`source_path`、`always_include`）
+  仅允许读取项目自身存储目录、已配置导入根或系统临时目录；敏感目录/名
+  （`/etc`、`.ssh`、`secret.key` 等）在白名单之上再拒。任意文件读取关闭。
+- **UDS 聊天时注入对齐**：UDS 消息流现在注入 `always_include` 上下文并在
+  assistant 消息上持久化 `rag_sources`，与 REST SSE 对齐。
+- **可靠性修复**：`create_message` 更新 `chat.updated_at`；文件夹移动拒绝
+  环 + 跨项目父级；`fork_chat` 限制拷贝条数（`FORK_MAX_MESSAGES`）；
+  `migrate_artifact` 本地 ref 插入失败时回滚上游迁移；
+  `export_artifacts` 报告成功/失败 id；identity JWT 校验加正 TTL 缓存以
+  降低事件循环阻塞。
+- **输入边界**：pydantic 模型钳制 `rag_top_k`/`rag_threshold`/
+  `temperature`/`max_tokens`/`content` 长度；RAG 查询在调用上游前钳制
+  `top_k`/`threshold`。
+- **可观测性 + 测试**：结构化 JSON 日志（`FUSION_LOG_JSON=1` 开启）已于
+  v0.5.2 落地；本次新增 13 个对抗修复测试，并修复
+  `test_tenant_isolation.py` 的测试隔离泄漏。180 测试全绿。
+- 上游：`fusion-core` 的 `verify_jwt` 按契约是同步的，迫使 identity 校验
+  走线程池客户端；已提 issue 推动异步 verify 路径。
+
 ### v0.5.2 — 结构化日志、租户级限流
 可观测性 + 多租户加固（对标清单 `insight/fusion-projects-insight-0903.md` §5.4 / §5.1）：
 - **结构化 JSON 日志（可选开启）**：`project_service/logging_config.py` 统一
