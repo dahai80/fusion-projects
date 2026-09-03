@@ -588,6 +588,54 @@ this service:
 
 ## Changelog
 
+### v0.6.0 — Adversarial audit fix pass (P0–P3)
+Closes every finding from the adversarial code audit
+(`audit/fusion-projects-0903.md`): 12 P0 fatal, 28 P1 logic, 16 P2, 24 P3,
+plus 6 architecture hard flaws. The service moves from "not releasable" to
+enterprise-production-viable:
+- **Tenant isolation is no longer a facade**: a store-layer
+  `assert_project_owned` chokepoint now guards every child-table accessor
+  (chats, messages, knowledge files/folders, bindings, snapshots,
+  instructions, audit_log, artifacts, attachments, rag_queries). No child
+  row is readable/mutable by a tenant that doesn't own its parent project.
+  Closes 6 P0/P1 IDOR findings at once.
+- **Filesystem hardening (FileStore)**: `project_id` is validated against a
+  strict charset and the resolved path is asserted to stay under
+  `storage_dir`; symlinks are rejected. `shutil.rmtree` can no longer be
+  turned into an arbitrary-directory-delete primitive.
+- **UDS daemon hardening**: symlink hijack rejection, `umask 0o077` + atomic
+  rename bind (no chmod race), per-read timeout on the client readline.
+- **Fail-closed tenant middleware**: if `FUSION_IDENTITY_SERVICE_TOKEN` is
+  set but `TenantMiddleware` install fails, startup aborts instead of
+  silently degrading to global-key auth (cross-tenant leak).
+- **Destructive schema rollback gated**: `migrate.down` refuses without
+  `FUSION_PROJECT_ALLOW_DANGEROUS_MIGRATE=1` — production is no longer one
+  RPC call from wiping tables.
+- **Source-path allowlist**: knowledge imports (`source_path`,
+  `always_include`) read only from the project's own storage dir, configured
+  import roots, or the system temp dir; sensitive dirs/names
+  (`/etc`, `.ssh`, `secret.key`, …) are denied on top. Arbitrary file read
+  closed.
+- **Chat-time injection parity (UDS)**: the UDS message stream now injects
+  `always_include` context and persists `rag_sources` on the assistant
+  message, matching REST SSE.
+- **Reliability fixes**: `create_message` bumps `chat.updated_at`; folder
+  moves reject cycles + cross-project parents; `fork_chat` caps copied
+  messages (`FORK_MAX_MESSAGES`); `migrate_artifact` rolls back the upstream
+  move if the local ref insert fails; `export_artifacts` reports
+  succeeded/failed ids; identity-JWT verify gets a positive TTL cache to
+  cut event-loop blocking.
+- **Input bounds**: pydantic models clamp `rag_top_k`/`rag_threshold`/
+  `temperature`/`max_tokens`/`content` length; RAG query clamps upstream
+  `top_k`/`threshold` before the call.
+- **Observability + tests**: structured JSON logging (opt-in via
+  `FUSION_LOG_JSON`) already landed in v0.5.2; this pass adds 13 new
+  adversarial-fix tests and fixes a test-isolation leak in
+  `test_tenant_isolation.py`. 180 tests green.
+- Upstream: `fusion-core` `verify_jwt` is sync by contract, which forces
+  the identity verify onto a thread-pool client; an issue is filed for an
+  async verify path.
+
 ### v0.5.2 — Structured logging, tenant-level rate limiting
 Observability + multi-tenant hardening from the benchmark backlog
 (`insight/fusion-projects-insight-0903.md` §5.4 / §5.1):

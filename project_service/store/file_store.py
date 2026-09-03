@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -10,19 +11,36 @@ logger = logging.getLogger(__name__)
 
 PROJECT_SUBDIRS = ("knowledge", "attachments", "snapshots", "exports")
 
+# project ids are server-generated uuid4 hex; reject anything else to block
+# path traversal (e.g. "../", absolute paths, symlink-able names).
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
 
 class QuotaExceeded(Exception):
     pass
 
 
+class InvalidProjectId(Exception):
+    pass
+
+
 class FileStore:
     def __init__(self, storage_dir: Optional[Path] = None) -> None:
-        self.storage_dir = Path(storage_dir) if storage_dir else config.STORAGE_DIR
+        self.storage_dir = (Path(storage_dir) if storage_dir else config.STORAGE_DIR).resolve()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         logger.info("FileStore ready storage=%s", self.storage_dir)
 
     def _project_dir(self, project_id: str) -> Path:
-        return self.storage_dir / project_id
+        # validate project_id against a strict charset and assert the resolved
+        # path stays under storage_dir — prevents shutil.rmtree path traversal.
+        if not _PROJECT_ID_RE.match(project_id or ""):
+            logger.warning("rejected invalid project_id for path: %r", project_id)
+            raise InvalidProjectId(project_id)
+        pdir = (self.storage_dir / project_id).resolve()
+        if not pdir.is_relative_to(self.storage_dir):
+            logger.warning("rejected project_dir escape: project_id=%s -> %s", project_id, pdir)
+            raise InvalidProjectId(project_id)
+        return pdir
 
     def project_dir(self, project_id: str) -> Path:
         return self._project_dir(project_id)
@@ -37,6 +55,10 @@ class FileStore:
     def remove_project(self, project_id: str) -> bool:
         pdir = self._project_dir(project_id)
         if pdir.exists():
+            # final guard: refuse to rmtree a symlink (could point outside storage).
+            if pdir.is_symlink():
+                logger.warning("refused remove_project on symlink id=%s dir=%s", project_id, pdir)
+                raise InvalidProjectId(project_id)
             shutil.rmtree(pdir)
             logger.info("removed project storage id=%s", project_id)
             return True
@@ -75,6 +97,9 @@ class FileStore:
         return total
 
     def check_quota(self, project_id: str, add_bytes: int) -> None:
+        if add_bytes < 0:
+            # negative add_bytes underflows the used+add check and bypasses quota.
+            raise QuotaExceeded(f"negative add_bytes rejected: {add_bytes}")
         project_quota = config.KNOWLEDGE_PROJECT_QUOTA_BYTES
         global_quota = config.KNOWLEDGE_GLOBAL_QUOTA_BYTES
         if project_quota > 0:

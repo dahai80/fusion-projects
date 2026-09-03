@@ -26,6 +26,7 @@ from project_service.engine.project_manager import (
     ProjectManager,
 )
 from project_service.engine.rag_coordinator import RAGCoordinator, RAGError
+from project_service.store.project_store import FolderError
 from project_service.models.agent_binding import (
     AgentBinding,
     PromptMergeMode,
@@ -828,6 +829,8 @@ async def create_folder(
         return await km.create_folder(project_id, payload)
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="project not found")
+    except FolderError as e:
+        raise HTTPException(status_code=400, detail="folder error: " + str(e))
 
 
 @router.patch("/projects/{project_id}/knowledge/folders/{folder_id}", response_model=KnowledgeFolder)
@@ -841,6 +844,8 @@ async def update_folder(
         return await km.update_folder(folder_id, payload)
     except FolderNotFound:
         raise HTTPException(status_code=404, detail="folder not found")
+    except FolderError as e:
+        raise HTTPException(status_code=400, detail="folder error: " + str(e))
 
 
 @router.delete("/projects/{project_id}/knowledge/folders/{folder_id}", status_code=204)

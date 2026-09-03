@@ -160,3 +160,23 @@ def test_rest_no_identity_token_keeps_auth_middleware(tmp_path, monkeypatch):
     from project_service.api.security import AuthMiddleware
     found = AuthMiddleware in _mw_classes(app)
     assert found, "AuthMiddleware should remain when no identity token"
+
+
+@pytest.fixture(autouse=True)
+def _restore_modules_after_tenant_test():
+    # rest_app / test_rest_* reload config/gateway_client/rest_server with a
+    # tenant env; monkeypatch restores the OS env but the reloaded module
+    # objects keep captured values (e.g. IDENTITY_SERVICE_TOKEN="svc-secret").
+    # without this teardown, later modules importing create_app see the
+    # tenant-gated config and get 401. reload the three modules back to a
+    # clean no-tenant state after every test in this file.
+    yield
+    import importlib
+    import os
+    os.environ.pop("FUSION_IDENTITY_SERVICE_TOKEN", None)
+    import project_service.config as cfg_mod
+    importlib.reload(cfg_mod)
+    import project_service.engine.gateway_client as gw_mod
+    importlib.reload(gw_mod)
+    import project_service.api.rest_server as rs_mod
+    importlib.reload(rs_mod)

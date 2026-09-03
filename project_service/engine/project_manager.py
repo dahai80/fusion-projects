@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
+from project_service import config
 from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.models.artifact_ref import ArtifactRef
 from project_service.models.project import (
@@ -203,7 +204,22 @@ class ProjectManager:
             "content_summary": artifact.get("summary"),
             "source_session_id": artifact.get("session_id"),
         }
-        row = self.store.create_artifact_ref(ref_data)
+        try:
+            row = self.store.create_artifact_ref(ref_data)
+        except Exception as e:
+            # upstream already moved the artifact to this project's KB; the local
+            # ref insert failed, leaving the artifact orphaned (moved but untracked).
+            # compensation: attempt to move it back to its source, and always raise
+            # so the caller knows the migration did not complete. log loudly.
+            logger.critical("migrate_artifact ref insert failed artifact=%s project=%s err=%s; attempting rollback", artifact_id, project_id, e)
+            try:
+                await self._call_artifacts_engine(
+                    "artifact.move_to_source_kb", {"artifact_id": artifact_id}
+                )
+                logger.warning("migrate_artifact rollback succeeded artifact=%s", artifact_id)
+            except Exception as rb_err:
+                logger.critical("migrate_artifact rollback FAILED artifact=%s now orphaned upstream: %s", artifact_id, rb_err)
+            raise
         logger.info("artifact migrated artifact=%s project=%s", artifact_id, project_id)
         return ArtifactRef.from_row(row)
 
@@ -240,6 +256,8 @@ class ProjectManager:
         if not refs:
             raise ArtifactNotFound("no artifacts to export")
         buf = io.BytesIO()
+        succeeded: list[str] = []
+        failed: list[str] = []
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for ref in refs:
                 try:
@@ -250,9 +268,20 @@ class ProjectManager:
                     filename = f"{ref['artifact_name'] or ref['artifact_id']}"
                     ext = _type_extension(ref.get("artifact_type", ""))
                     zf.writestr(f"{filename}{ext}", content)
-                except Exception:
-                    logger.warning("export failed for artifact=%s, skipping", ref["artifact_id"])
-        logger.info("exported artifacts project=%s count=%d", project_id, len(refs))
+                    succeeded.append(ref["artifact_id"])
+                except Exception as e:
+                    failed.append(ref["artifact_id"])
+                    logger.warning("export failed for artifact=%s, skipping: %s", ref["artifact_id"], e)
+        # all-failed -> the zip is empty, which is indistinguishable from success
+        # to a caller; raise so the failure is visible instead of silently empty.
+        if not succeeded:
+            raise ArtifactNotFound(
+                f"export failed for all {len(refs)} artifacts: {failed}"
+            )
+        zf_report = {"requested": len(refs), "succeeded": len(succeeded), "failed": len(failed), "failed_ids": failed}
+        with zipfile.ZipFile(buf, "a", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("export_report.json", json.dumps(zf_report, ensure_ascii=False, indent=2))
+        logger.info("exported artifacts project=%s requested=%d succeeded=%d failed=%d", project_id, len(refs), len(succeeded), len(failed))
         return buf.getvalue()
 
     async def export_project(self, project_id: str) -> bytes:
@@ -271,7 +300,9 @@ class ProjectManager:
                     zf.writestr("chats.json", json.dumps(chats, ensure_ascii=False, indent=2))
                     for c in chats:
                         cid = c["id"]
-                        msgs = self.store.list_messages(cid)
+                        # cap per-chat message dump so one huge chat can't OOM
+                        # the export before the inline-size guard fires.
+                        msgs = self.store.list_messages(cid, limit=config.EXPORT_MAX_MESSAGES_PER_CHAT)
                         if msgs:
                             zf.writestr(f"chats/{cid}/messages.json", json.dumps(msgs, ensure_ascii=False, indent=2))
                 folders = self.store.list_folders(project_id)

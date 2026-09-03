@@ -1,3 +1,4 @@
+import hmac
 import logging
 import time
 from collections import defaultdict
@@ -56,7 +57,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             logger.warning("rest auth missing token path=%s client=%s", path, client)
             metrics.record_auth_reject()
             return JSONResponse(status_code=401, content={"detail": "missing authorization"})
-        if token != config.REST_API_KEY:
+        if not hmac.compare_digest(token, config.REST_API_KEY):
             client = request.client.host if request.client else "?"
             logger.warning("rest auth invalid token path=%s client=%s", path, client)
             metrics.record_auth_reject()
@@ -66,12 +67,50 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 class BodySizeMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # check Content-Length first (fast path) but also enforce against
+        # chunked transfer-encoding, which has no Content-Length — cap by
+        # accumulating bytes while streaming the body.
         cl = request.headers.get("content-length")
         if cl and cl.isdigit() and int(cl) > config.REST_MAX_BODY_BYTES:
             logger.warning("rest body too large path=%s size=%s", request.url.path, cl)
             metrics.record_body_oversize()
             return JSONResponse(status_code=413, content={"detail": "request body too large"})
+        if request.headers.get("transfer-encoding", "").lower() == "chunked":
+            return await self._check_chunked(request, call_next)
         return await call_next(request)
+
+    async def _check_chunked(self, request: Request, call_next):
+        # wrap the receive callable so we can count streamed body bytes and
+        # reject mid-stream if a chunked body exceeds the cap.
+        max_bytes = config.REST_MAX_BODY_BYTES
+        received = 0
+        exhausted = False
+        original_receive = request.receive
+
+        async def capped_receive():
+            nonlocal received, exhausted
+            if exhausted:
+                return {"type": "http.disconnect"}
+            message = await original_receive()
+            if message["type"] == "http.request":
+                body = message.get("body", b"")
+                received += len(body)
+                if received > max_bytes:
+                    exhausted = True
+                    logger.warning("rest chunked body too large path=%s size=%s", request.url.path, received)
+                    metrics.record_body_oversize()
+                    raise _ChunkTooLarge()
+            return message
+
+        request._receive = capped_receive
+        try:
+            return await call_next(request)
+        except _ChunkTooLarge:
+            return JSONResponse(status_code=413, content={"detail": "request body too large"})
+
+
+class _ChunkTooLarge(Exception):
+    pass
 
 
 class _RateLimiter:
@@ -144,9 +183,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             ctx = None
         if ctx is not None and ctx.tenant_id:
             return f"tenant:{ctx.tenant_id}"
-        xff = request.headers.get("x-forwarded-for", "")
-        if xff:
-            client = xff.split(",")[0].strip() or "unknown"
-        else:
-            client = request.client.host if request.client else "unknown"
+        # only trust X-Forwarded-For when behind an explicit trusted proxy;
+        # otherwise a client can spoof the first hop to bypass per-IP limits.
+        if getattr(config, "REST_TRUST_PROXY", False):
+            xff = request.headers.get("x-forwarded-for", "")
+            if xff:
+                client = xff.split(",")[0].strip() or "unknown"
+                return client
+        client = request.client.host if request.client else "unknown"
         return client

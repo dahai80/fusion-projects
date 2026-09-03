@@ -66,19 +66,38 @@ class RAGCoordinator:
         if status == 404:
             logger.warning("rag kb not found kb_id=%s, treating as stale", kb_id)
             return False
-        logger.warning("rag kb probe ambiguous kb_id=%s status=%s, keep existing (transient err)", kb_id, status)
-        return True
+        # ambiguous (5xx/-1/timeout): previously returned True and kept a
+        # possibly-dead kb_id, cascading all later ops to failure. retry once;
+        # still ambiguous -> treat as NOT existing so _ensure_kb recreates.
+        logger.warning("rag kb probe ambiguous kb_id=%s status=%s, retrying", kb_id, status)
+        status2 = await self.upstream.rag_kb_status(kb_id=kb_id)
+        if status2 == 200:
+            return True
+        if status2 == 404:
+            return False
+        logger.warning("rag kb probe still ambiguous kb_id=%s status=%s, recreating", kb_id, status2)
+        return False
 
     async def get_always_include_context(self, project_id: str) -> tuple[str, list[dict]]:
         await self._ensure_project(project_id)
         files = await asyncio.to_thread(self.store.list_always_include_files, project_id)
         if not files:
             return "", []
+        # containment root: always_include files must live under this project's
+        # knowledge dir; reject any file_path that escapes (arbitrary file read).
+        knowledge_root = (config.STORAGE_DIR / project_id / "knowledge").resolve()
         parts: list[str] = []
         sources: list[dict] = []
         for f in files:
             try:
-                text = Path(f["file_path"]).read_text(encoding="utf-8", errors="replace")
+                fpath = Path(f["file_path"]).resolve()
+                if not fpath.is_relative_to(knowledge_root):
+                    logger.warning("always_include path escapes project root file=%s path=%s", f["id"], fpath)
+                    continue
+                if fpath.stat().st_size > config.ALWAYS_INCLUDE_MAX_BYTES:
+                    logger.warning("always_include file too large file=%s size=%s", f["id"], fpath.stat().st_size)
+                    continue
+                text = fpath.read_text(encoding="utf-8", errors="replace")
             except OSError as e:
                 logger.warning("always_include read failed file=%s err=%s", f["id"], e)
                 continue
@@ -117,7 +136,7 @@ class RAGCoordinator:
         except GatewayError as e:
             self.store.update_knowledge_file(file_id, {"index_status": "FAILED"})
             logger.error("rag index failed file=%s error=%s", file_id, e)
-            return {"error": "gateway_error", "detail": str(e)}
+            raise RAGError(f"index failed: {e}") from e
         except Exception as e:
             self.store.update_knowledge_file(file_id, {"index_status": "FAILED"})
             logger.error("rag index unexpected failure file=%s error=%s", file_id, e)
@@ -172,6 +191,16 @@ class RAGCoordinator:
         rag_mode = mode if mode is not None else project.get("rag_mode", "AUTO")
         rag_top_k = top_k if top_k is not None else project.get("rag_top_k", 5)
         rag_threshold = threshold if threshold is not None else project.get("rag_threshold", 0.65)
+        # clamp inputs: negative/oversized top_k and out-of-range threshold
+        # would distort ranking or force giant upstream responses.
+        try:
+            rag_top_k = max(1, min(int(rag_top_k), config.RAG_MAX_TOP_K))
+        except (TypeError, ValueError):
+            rag_top_k = config.DEFAULT_RAG_TOP_K
+        try:
+            rag_threshold = max(0.0, min(float(rag_threshold), 1.0))
+        except (TypeError, ValueError):
+            rag_threshold = config.DEFAULT_RAG_THRESHOLD
         if rag_mode == "MANUAL" and not folder_ids:
             logger.warning("MANUAL RAG mode but no folder_ids specified, returning empty")
             return {"results": [], "mode": rag_mode}
@@ -215,40 +244,57 @@ class RAGCoordinator:
         per_folder = await asyncio.gather(*[_search_one(p) for p in prefixes])
         raw_groups = [it for it in per_folder if it]
         total_raw = sum(len(g) for g in raw_groups)
-        items = self._merge_results(raw_groups, top_k=rag_top_k)
-        below_threshold = max(0, total_raw - len(items))
-        metrics.record_rag_query(recalled=len(items), below_threshold=below_threshold)
+        items, dropped_below = self._merge_results(raw_groups, top_k=rag_top_k, threshold=rag_threshold)
+        metrics.record_rag_query(recalled=len(items), below_threshold=dropped_below)
         sources = self._to_sources(items, project_id)
         logger.info(
             "rag query project=%s mode=%s folders=%d raw=%d recalled=%d below=%d",
-            project_id, rag_mode, len(prefixes), total_raw, len(items), below_threshold,
+            project_id, rag_mode, len(prefixes), total_raw, len(items), dropped_below,
         )
         return {"results": items, "sources": sources, "mode": rag_mode}
 
     @staticmethod
-    def _merge_results(groups: list[list], *, top_k: int) -> list:
+    def _merge_results(groups: list[list], *, top_k: int, threshold: float) -> tuple[list, int]:
         seen: set = set()
         merged: list = []
         for group in groups:
             for it in group:
                 if not isinstance(it, dict):
                     continue
-                key = it.get("doc_id") or it.get("id") or it.get("document_id") or id(it)
+                key = it.get("doc_id") or it.get("id") or it.get("document_id")
+                if not key:
+                    # no stable identity — skip rather than fall back to id(it),
+                    # which is non-deterministic (object address can be reused).
+                    logger.warning("rag result item lacks identity, skipping: %s", list(it.keys()))
+                    continue
                 if key in seen:
                     continue
                 seen.add(key)
                 merged.append(it)
+
         def _score(it: dict) -> float:
             s = it.get("score")
             if isinstance(s, (int, float)):
                 return float(s)
             return 0.0
+
         merged.sort(key=_score, reverse=True)
-        return merged[:top_k]
+        # apply the score threshold that was previously dead code: filter out
+        # items below threshold before top_k truncation, and count them.
+        kept = [it for it in merged if _score(it) >= threshold]
+        dropped_below = len(merged) - len(kept)
+        return kept[:top_k], dropped_below
 
     def _to_sources(self, items: list, project_id: str) -> list[dict]:
         files = {f["id"]: f for f in self.store.list_knowledge_files(project_id)}
-        by_doc: dict[str, str] = {f["rag_doc_id"]: f["name"] for f in files.values() if f.get("rag_doc_id")}
+        # O(1) lookup by rag_doc_id instead of inner scan per item.
+        by_doc_id: dict[str, str] = {}
+        by_doc_name: dict[str, str] = {}
+        for fid, f in files.items():
+            did = f.get("rag_doc_id")
+            if did:
+                by_doc_id[did] = fid
+                by_doc_name[did] = f["name"]
         sources: list[dict] = []
         for it in items:
             if not isinstance(it, dict):
@@ -256,13 +302,9 @@ class RAGCoordinator:
             doc_id = it.get("doc_id") or it.get("id") or it.get("document_id")
             file_name = (
                 it.get("doc_name") or it.get("name")
-                or by_doc.get(doc_id) or "unknown"
+                or by_doc_name.get(doc_id) or "unknown"
             )
-            file_id = None
-            for fid, f in files.items():
-                if f.get("rag_doc_id") and f["rag_doc_id"] == doc_id:
-                    file_id = fid
-                    break
+            file_id = by_doc_id.get(doc_id)
             text = it.get("text") or it.get("content") or ""
             sources.append({
                 "file_id": file_id,

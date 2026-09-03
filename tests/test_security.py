@@ -14,7 +14,7 @@ async def test_rest_auth_disabled_when_no_key(monkeypatch):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/api/v1/projects")
-        assert r.status_code in (200, 404)
+        assert r.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -71,7 +71,7 @@ async def test_rest_auth_rejects_missing_token(monkeypatch):
         r = await client.get("/api/v1/projects", headers={"Authorization": "Bearer wrong"})
         assert r.status_code == 403
         r = await client.get("/api/v1/projects", headers={"Authorization": "Bearer secret123"})
-        assert r.status_code in (200, 404)
+        assert r.status_code == 200
         r = await client.get("/health")
         assert r.status_code == 200
 
@@ -83,7 +83,7 @@ async def test_rest_auth_accepts_x_api_key(monkeypatch):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/api/v1/projects", headers={"x-api-key": "secret123"})
-        assert r.status_code in (200, 404)
+        assert r.status_code == 200
 
 
 @pytest.mark.asyncio

@@ -49,28 +49,43 @@ def record_body_oversize() -> None:
 
 
 def snapshot() -> dict:
+    # copy the counters under the lock, then compute derived values outside.
+    # this keeps the critical section to a few dict copies so async recorders
+    # (which call record_* without to_thread) never stall on a held lock long
+    # enough to matter, and the computation can't block a recorder.
     with _lock:
-        avg_recall = (_rag_recall_sum / _rag_query_total) if _rag_query_total else 0.0
-        return {
-            "requests_total": dict(_requests_total),
-            "requests_by_status": {str(k): v for k, v in _requests_by_status.items()},
-            "rate_limit_rejected": _rate_limit_rejected,
-            "auth_rejected": _auth_rejected,
-            "body_oversize_rejected": _body_oversize,
-            "total_requests": sum(_requests_total.values()),
-            "rag_query_total": _rag_query_total,
-            "rag_avg_recall": round(avg_recall, 2),
-            "rag_zero_recall": _rag_zero_recall,
-            "rag_below_threshold": _rag_below_threshold,
-        }
+        requests_total = dict(_requests_total)
+        requests_by_status = {str(k): v for k, v in _requests_by_status.items()}
+        rate_limit_rejected = _rate_limit_rejected
+        auth_rejected = _auth_rejected
+        body_oversize = _body_oversize
+        rag_query_total = _rag_query_total
+        rag_recall_sum = _rag_recall_sum
+        rag_zero_recall = _rag_zero_recall
+        rag_below_threshold = _rag_below_threshold
+    avg_recall = (rag_recall_sum / rag_query_total) if rag_query_total else 0.0
+    return {
+        "requests_total": requests_total,
+        "requests_by_status": requests_by_status,
+        "rate_limit_rejected": rate_limit_rejected,
+        "auth_rejected": auth_rejected,
+        "body_oversize_rejected": body_oversize,
+        "total_requests": sum(requests_total.values()),
+        "rag_query_total": rag_query_total,
+        "rag_avg_recall": round(avg_recall, 2),
+        "rag_zero_recall": rag_zero_recall,
+        "rag_below_threshold": rag_below_threshold,
+    }
 
 
 def reset() -> None:
-    global _requests_total, _requests_by_status, _rate_limit_rejected, _auth_rejected, _body_oversize
+    # clear in place rather than rebinding the container globals — rebind
+    # lets in-flight recorders keep writing to the old (discarded) dicts.
+    global _rate_limit_rejected, _auth_rejected, _body_oversize
     global _rag_query_total, _rag_recall_sum, _rag_zero_recall, _rag_below_threshold
     with _lock:
-        _requests_total = defaultdict(int)
-        _requests_by_status = defaultdict(int)
+        _requests_total.clear()
+        _requests_by_status.clear()
         _rate_limit_rejected = 0
         _auth_rejected = 0
         _body_oversize = 0

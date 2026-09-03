@@ -23,6 +23,14 @@ def _current_tenant_id() -> str:
     ctx = current()
     return ctx.tenant_id if ctx else ""
 
+
+class TenantMismatch(Exception):
+    pass
+
+
+class FolderError(Exception):
+    pass
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
@@ -229,6 +237,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+MAX_PAGE_SIZE = 500
+
+
+def _paginate(limit: Optional[int], offset: int) -> tuple[int, int]:
+    # clamp pagination inputs: negative limit -> default, oversized -> cap,
+    # negative offset -> 0. prevents LIMIT -1 (returns all rows) DoS.
+    off = int(offset) if offset and int(offset) > 0 else 0
+    if limit is None:
+        return MAX_PAGE_SIZE, off
+    lim = int(limit)
+    if lim <= 0:
+        lim = 100
+    if lim > MAX_PAGE_SIZE:
+        lim = MAX_PAGE_SIZE
+    return lim, off
+
+
 # schema version tracked via PRAGMA user_version. bump when a _migrate_* runs.
 # down-migrations (_ROLLBACK_SQL) restore the prior shape; for additive-only
 # changes the safe rollback is restoring the pre-migration SQLite file backup.
@@ -237,6 +262,8 @@ SCHEMA_VERSION = 4
 _ROLLBACK_SQL: dict[int, list[str]] = {
     4: [
         # _migrate_always_include added knowledge_files.always_include.
+        # DROP INDEX first — DROP COLUMN fails if a multi-column index references it.
+        "DROP INDEX IF EXISTS idx_kfile_always",
         "ALTER TABLE knowledge_files DROP COLUMN always_include",
     ],
     3: [
@@ -293,26 +320,34 @@ class ProjectStore:
             for col in cols:
                 if col[1] == "project_id" and col[3]:  # col[3] = notnull
                     logger.info("migrating chats.project_id to nullable")
-                    self._conn.execute(
-                        "CREATE TABLE chats_new ("
-                        "id TEXT PRIMARY KEY, project_id TEXT, title TEXT, "
-                        "is_starred INTEGER NOT NULL DEFAULT 0, agent_id TEXT, "
-                        "fork_from_chat_id TEXT, fork_from_snapshot_id TEXT, "
-                        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
-                        "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE)"
-                    )
-                    self._conn.execute(
-                        "INSERT INTO chats_new SELECT * FROM chats"
-                    )
-                    self._conn.execute("DROP TABLE chats")
-                    self._conn.execute("ALTER TABLE chats_new RENAME TO chats")
-                    self._conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id)"
-                    )
-                    self._conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_chats_starred ON chats(is_starred)"
-                    )
-                    self._conn.commit()
+                    try:
+                        self._conn.execute(
+                            "CREATE TABLE chats_new ("
+                            "id TEXT PRIMARY KEY, project_id TEXT, title TEXT, "
+                            "is_starred INTEGER NOT NULL DEFAULT 0, agent_id TEXT, "
+                            "fork_from_chat_id TEXT, fork_from_snapshot_id TEXT, "
+                            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                            "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE)"
+                        )
+                        self._conn.execute(
+                            "INSERT INTO chats_new SELECT * FROM chats"
+                        )
+                        self._conn.execute("DROP TABLE chats")
+                        self._conn.execute("ALTER TABLE chats_new RENAME TO chats")
+                        self._conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id)"
+                        )
+                        self._conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_chats_starred ON chats(is_starred)"
+                        )
+                        self._conn.commit()
+                    except Exception:
+                        # clean up residual chats_new so a retry isn't blocked
+                        # by "table already exists".
+                        self._conn.execute("DROP TABLE IF EXISTS chats_new")
+                        self._conn.rollback()
+                        logger.exception("chats.project_id nullable migration failed, cleaned chats_new")
+                        raise
                     break
 
     def _migrate_snapshots(self) -> None:
@@ -432,6 +467,30 @@ class ProjectStore:
             cur.execute("SELECT 1 FROM projects WHERE id=?", (project_id,))
             return cur.fetchone() is not None
 
+    def _project_tenant(self, project_id: str) -> Optional[str]:
+        # raw tenant lookup, bypasses get_project tenant guard — for internal
+        # ownership checks. returns None if project missing.
+        with self._cursor() as cur:
+            cur.execute("SELECT tenant_id FROM projects WHERE id=?", (project_id,))
+            r = cur.fetchone()
+        return r[0] if r else None
+
+    def assert_project_owned(self, project_id: str) -> None:
+        # tenant isolation chokepoint: every child-resource accessor/mutator
+        # MUST call this before touching child rows. raises TenantMismatch if
+        # the calling tenant does not own the project; raises ProjectNotFound-
+        # style (returns None handled by caller) if project missing.
+        row_tenant = self._project_tenant(project_id)
+        if row_tenant is None:
+            return
+        ctx_tenant = _current_tenant_id()
+        if ctx_tenant and row_tenant != ctx_tenant:
+            logger.warning(
+                "cross-tenant denied project=%s row_tenant=%s ctx_tenant=%s",
+                project_id, row_tenant, ctx_tenant,
+            )
+            raise TenantMismatch(project_id)
+
     def create_project(self, data: dict) -> dict:
         pid = data.get("id") or uuid.uuid4().hex
         now = _now()
@@ -447,7 +506,7 @@ class ProjectStore:
             "rag_top_k": data.get("rag_top_k", config.DEFAULT_RAG_TOP_K),
             "rag_threshold": data.get("rag_threshold", config.DEFAULT_RAG_THRESHOLD),
             "kb_id": data.get("kb_id"),
-            "tenant_id": data.get("tenant_id", _current_tenant_id()),
+            "tenant_id": _current_tenant_id(),
             "created_at": now,
             "updated_at": now,
         }
@@ -508,8 +567,13 @@ class ProjectStore:
             + " ORDER BY p.is_starred DESC, p.updated_at DESC"
         )
         if limit is not None:
+            lim, off = _paginate(limit, offset)
             sql += " LIMIT ? OFFSET ?"
-            params.extend([int(limit), int(offset)])
+            params.extend([lim, off])
+        else:
+            lim, off = _paginate(MAX_PAGE_SIZE, offset)
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([lim, off])
         with self._cursor() as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
@@ -612,19 +676,20 @@ class ProjectStore:
     ) -> dict:
         sid = uuid.uuid4().hex
         now = _now()
+        label_val = label if label is not None else "auto"
         row = {
             "id": sid,
             "project_id": project_id,
             "content": content,
-            "label": label,
+            "label": label_val,
             "created_at": now,
         }
         with self._cursor() as cur:
             cur.execute(
                 "INSERT INTO instruction_snapshots (id, project_id, content, label, created_at) VALUES (?,?,?,?,?)",
-                (sid, project_id, content, label, now),
+                (sid, project_id, content, label_val, now),
             )
-        logger.info("snapshotted instruction project=%s label=%s", project_id, label)
+        logger.info("snapshotted instruction project=%s label=%s", project_id, label_val)
         return row
 
     def list_snapshots(self, project_id: str) -> list[dict]:
@@ -639,7 +704,14 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM instruction_snapshots WHERE id=?", (snapshot_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        try:
+            self.assert_project_owned(row["project_id"])
+        except TenantMismatch:
+            return None
+        return row
 
     def delete_snapshot(self, snapshot_id: str) -> bool:
         with self._cursor() as cur:
@@ -677,13 +749,27 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM project_artifacts WHERE id=?", (ref_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        try:
+            self.assert_project_owned(row["project_id"])
+        except TenantMismatch:
+            return None
+        return row
 
     def get_artifact_ref(self, artifact_id: str) -> Optional[dict]:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM project_artifacts WHERE artifact_id=?", (artifact_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        try:
+            self.assert_project_owned(row["project_id"])
+        except TenantMismatch:
+            return None
+        return row
 
     def list_artifact_refs(
         self,
@@ -752,7 +838,21 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM chats WHERE id=?", (chat_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        if row.get("project_id"):
+            try:
+                self.assert_project_owned(row["project_id"])
+            except TenantMismatch:
+                return None
+        return row
+
+    def _chat_project_id(self, chat_id: str) -> Optional[str]:
+        with self._cursor() as cur:
+            cur.execute("SELECT project_id FROM chats WHERE id=?", (chat_id,))
+            r = cur.fetchone()
+        return r[0] if r else None
 
     def list_chats(self, project_id: str, only_starred: bool = False) -> list[dict]:
         clauses = ["project_id=?"]
@@ -837,7 +937,16 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM chat_snapshots WHERE id=?", (snapshot_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        pid = self._chat_project_id(row["chat_id"])
+        if pid:
+            try:
+                self.assert_project_owned(pid)
+            except TenantMismatch:
+                return None
+        return row
 
     def delete_chat_snapshot(self, snapshot_id: str) -> bool:
         with self._cursor() as cur:
@@ -869,6 +978,9 @@ class ProjectStore:
                 f"INSERT INTO messages ({cols}) VALUES ({placeholders})",
                 list(row.values()),
             )
+            # bump parent chat updated_at so chat ordering reflects latest activity;
+            # without this a chat with 1000 messages still sorts by its create time.
+            cur.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, data["chat_id"]))
         logger.info("created message id=%s chat=%s role=%s", mid, data["chat_id"], data["role"])
         return self.get_message(mid)
 
@@ -876,7 +988,16 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM messages WHERE id=?", (message_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        pid = self._chat_project_id(row["chat_id"])
+        if pid:
+            try:
+                self.assert_project_owned(pid)
+            except TenantMismatch:
+                return None
+        return row
 
     def set_message_rag_sources(self, message_id: str, sources_json: str) -> bool:
         with self._cursor() as cur:
@@ -890,6 +1011,7 @@ class ProjectStore:
         return updated > 0
 
     def list_messages(self, chat_id: str, limit: int = 100, offset: int = 0, keep_recent: bool = False) -> list[dict]:
+        lim, off = _paginate(limit, offset)
         with self._cursor() as cur:
             if keep_recent:
                 # keep only the most-recent `limit` messages, then re-order ASC so the
@@ -897,12 +1019,12 @@ class ProjectStore:
                 cur.execute(
                     "SELECT * FROM (SELECT * FROM messages WHERE chat_id=? "
                     "ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
-                    (chat_id, limit),
+                    (chat_id, lim),
                 )
             else:
                 cur.execute(
                     "SELECT * FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
-                    (chat_id, limit, offset),
+                    (chat_id, lim, off),
                 )
             return [dict(r) for r in cur.fetchall()]
 
@@ -951,31 +1073,71 @@ class ProjectStore:
         return len(payload)
 
     def replace_chat_messages(self, chat_id: str, rows: list[dict]) -> int:
-        with self._lock:
-            try:
-                cur = self._conn.cursor()
-                cur.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
-                inserted = self.create_messages_batch(chat_id, rows)
-                cur.execute("UPDATE chats SET updated_at=? WHERE id=?", (_now(), chat_id))
-                self._conn.commit()
-                logger.info("replaced chat messages chat=%s count=%d", chat_id, inserted)
-                return inserted
-            except Exception:
-                self._conn.rollback()
-                raise
-            finally:
-                cur.close()
+        # atomic: DELETE + INSERT + UPDATE chats in one transaction. do NOT
+        # call create_messages_batch (it opens its own _cursor/commit) — inline
+        # the insert so all three statements share one commit.
+        now = _now()
+        payload = []
+        for r in rows:
+            mid = uuid.uuid4().hex
+            payload.append((
+                mid, chat_id, r["role"], r["content"],
+                r.get("rag_sources"), r.get("tool_calls"), r.get("token_usage"), now,
+            ))
+        insert_sql = (
+            "INSERT INTO messages (id, chat_id, role, content, "
+            "rag_sources, tool_calls, token_usage, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        with self._cursor() as cur:
+            cur.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+            if payload:
+                cur.executemany(insert_sql, payload)
+            cur.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, chat_id))
+        logger.info("replaced chat messages chat=%s count=%d", chat_id, len(payload))
+        return len(payload)
 
     # ── Knowledge Folder CRUD ──
+
+    def _validate_folder_parent(self, project_id: str, parent_id: Optional[str], self_id: Optional[str] = None) -> None:
+        # P1-4: parent must belong to the same project (cross-project parent_id
+        # would let one project's folder tree reference another), and the parent
+        # chain must not include self_id (cycle — update_folder moving a folder
+        # under its own descendant).
+        if not parent_id:
+            return
+        with self._cursor() as cur:
+            cur.execute("SELECT project_id FROM knowledge_folders WHERE id=?", (parent_id,))
+            prow = cur.fetchone()
+        if not prow:
+            raise FolderError(f"parent folder not found: {parent_id}")
+        if prow["project_id"] != project_id:
+            raise FolderError(f"parent folder {parent_id} belongs to a different project")
+        if self_id is not None:
+            # walk up the chain; if we hit self_id it's a cycle.
+            visited: set[str] = set()
+            cur_id: Optional[str] = parent_id
+            with self._cursor() as cur:
+                while cur_id:
+                    if cur_id == self_id:
+                        raise FolderError(f"cycle detected: folder {self_id} would be its own ancestor")
+                    if cur_id in visited:
+                        raise FolderError("cycle detected in folder parent chain")
+                    visited.add(cur_id)
+                    cur.execute("SELECT parent_id FROM knowledge_folders WHERE id=?", (cur_id,))
+                    r = cur.fetchone()
+                    cur_id = r["parent_id"] if r else None
 
     def create_folder(self, data: dict) -> dict:
         fid = data.get("id") or uuid.uuid4().hex
         now = _now()
+        parent_id = data.get("parent_id")
+        self._validate_folder_parent(data["project_id"], parent_id)
         row = {
             "id": fid,
             "project_id": data["project_id"],
             "name": data["name"],
-            "parent_id": data.get("parent_id"),
+            "parent_id": parent_id,
             "sort_order": data.get("sort_order", 0),
             "created_at": now,
         }
@@ -993,7 +1155,14 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM knowledge_folders WHERE id=?", (folder_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        try:
+            self.assert_project_owned(row["project_id"])
+        except TenantMismatch:
+            return None
+        return row
 
     def list_folders(self, project_id: str, parent_id: Optional[str] = None) -> list[dict]:
         if parent_id is not None:
@@ -1011,6 +1180,11 @@ class ProjectStore:
         clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not clean:
             return self.get_folder(folder_id)
+        if "parent_id" in clean:
+            existing = self.get_folder(folder_id)
+            if not existing:
+                return None
+            self._validate_folder_parent(existing["project_id"], clean["parent_id"], self_id=folder_id)
         sets = ",".join(f"{k}=?" for k in clean)
         vals = list(clean.values()) + [folder_id]
         with self._cursor() as cur:
@@ -1034,10 +1208,16 @@ class ProjectStore:
     def create_knowledge_file(self, data: dict) -> dict:
         fid = data.get("id") or uuid.uuid4().hex
         now = _now()
+        folder_id = data.get("folder_id")
+        if folder_id:
+            # P1-5: folder_id must belong to the same project — without this a
+            # file can be filed under another project's folder, breaking RAG
+            # scope filtering (which keys on project_id + folder_id).
+            self._validate_folder_parent(data["project_id"], folder_id)
         row = {
             "id": fid,
             "project_id": data["project_id"],
-            "folder_id": data.get("folder_id"),
+            "folder_id": folder_id,
             "name": data["name"],
             "original_name": data["original_name"],
             "file_path": data["file_path"],
@@ -1063,7 +1243,14 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM knowledge_files WHERE id=?", (file_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        try:
+            self.assert_project_owned(row["project_id"])
+        except TenantMismatch:
+            return None
+        return row
 
     def list_knowledge_files(self, project_id: str, folder_id: Optional[str] = None) -> list[dict]:
         if folder_id is not None:
@@ -1089,6 +1276,11 @@ class ProjectStore:
         clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not clean:
             return self.get_knowledge_file(file_id)
+        if "folder_id" in clean and clean["folder_id"]:
+            existing = self.get_knowledge_file(file_id)
+            if not existing:
+                return None
+            self._validate_folder_parent(existing["project_id"], clean["folder_id"])
         clean["updated_at"] = _now()
         sets = ",".join(f"{k}=?" for k in clean)
         vals = list(clean.values()) + [file_id]
@@ -1136,13 +1328,27 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM chat_agent_bindings WHERE id=?", (binding_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        try:
+            self.assert_project_owned(row["project_id"])
+        except TenantMismatch:
+            return None
+        return row
 
     def get_binding_by_chat(self, chat_id: str) -> Optional[dict]:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM chat_agent_bindings WHERE chat_id=?", (chat_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        try:
+            self.assert_project_owned(row["project_id"])
+        except TenantMismatch:
+            return None
+        return row
 
     def get_binding_by_project(self, project_id: str) -> Optional[dict]:
         with self._cursor() as cur:
@@ -1240,7 +1446,16 @@ class ProjectStore:
         with self._cursor() as cur:
             cur.execute("SELECT * FROM temp_attachments WHERE id=?", (attachment_id,))
             r = cur.fetchone()
-        return dict(r) if r else None
+        if not r:
+            return None
+        row = dict(r)
+        pid = self._chat_project_id(row["chat_id"])
+        if pid:
+            try:
+                self.assert_project_owned(pid)
+            except TenantMismatch:
+                return None
+        return row
 
     def delete_temp_attachment(self, attachment_id: str) -> bool:
         with self._cursor() as cur:
@@ -1280,9 +1495,10 @@ class ProjectStore:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
+        lim, off = _paginate(limit, offset)
         with self._cursor() as cur:
             cur.execute(
                 "SELECT * FROM audit_log WHERE project_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (project_id, limit, offset),
+                (project_id, lim, off),
             )
             return [dict(r) for r in cur.fetchall()]

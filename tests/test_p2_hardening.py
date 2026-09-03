@@ -24,6 +24,9 @@ async def test_rate_limit_honors_xff(monkeypatch):
     monkeypatch.setattr(config, "REST_RATE_LIMIT", 2)
     monkeypatch.setattr(config, "REST_RATE_WINDOW", 60.0)
     monkeypatch.setattr(config, "REST_API_KEY", "")
+    # XFF is only trusted when REST_TRUST_PROXY is explicitly set (P0-9: default
+    # off so clients can't spoof the rate-limit key with a forged first hop).
+    monkeypatch.setattr(config, "REST_TRUST_PROXY", True)
     from project_service.api import security
     security.reset_rate_limiter()
     app = create_app()
@@ -81,8 +84,9 @@ def test_rate_key_falls_back_to_ip_without_tenant():
     assert security.RateLimitMiddleware._rate_key(req) == "9.9.9.9"
 
 
-def test_rate_key_honors_xff_without_tenant():
+def test_rate_key_honors_xff_without_tenant(monkeypatch):
     from project_service.api import security
+    monkeypatch.setattr(config, "REST_TRUST_PROXY", True)
 
     req = type(
         "R",
@@ -90,6 +94,21 @@ def test_rate_key_honors_xff_without_tenant():
         {"headers": {"x-forwarded-for": "203.0.113.9, 10.0.0.1"}, "client": None},
     )()
     assert security.RateLimitMiddleware._rate_key(req) == "203.0.113.9"
+
+
+def test_rate_key_ignores_xff_when_proxy_untrusted(monkeypatch):
+    # P0-9: without REST_TRUST_PROXY, XFF must NOT key the rate limiter —
+    # a forged first hop would otherwise let one client spread load across
+    # fake IPs and bypass per-IP limits.
+    from project_service.api import security
+    monkeypatch.setattr(config, "REST_TRUST_PROXY", False)
+
+    req = type(
+        "R",
+        (),
+        {"headers": {"x-forwarded-for": "203.0.113.9, 10.0.0.1"}, "client": type("C", (), {"host": "9.9.9.9"})()},
+    )()
+    assert security.RateLimitMiddleware._rate_key(req) == "9.9.9.9"
 
 
 # ── P2: structured JSON logging ──
