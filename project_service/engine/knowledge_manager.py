@@ -336,3 +336,10 @@ class KnowledgeManager:
             raise KnowledgeFileNotFound(file_id)
         logger.info("file moved id=%s folder=%s", file_id, folder_id)
         return KnowledgeFile.from_row(row)
+
+    async def set_always_include(self, file_id: str, always_include: bool) -> KnowledgeFile:
+        row = self.store.update_knowledge_file(file_id, {"always_include": 1 if always_include else 0})
+        if not row:
+            raise KnowledgeFileNotFound(file_id)
+        logger.info("file always_include set id=%s value=%s", file_id, always_include)
+        return KnowledgeFile.from_row(row)

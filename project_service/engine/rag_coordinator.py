@@ -1,9 +1,10 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 
-from project_service import config
+from project_service import config, metrics
 from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
 from project_service.store.project_store import ProjectStore
@@ -67,6 +68,39 @@ class RAGCoordinator:
             return False
         logger.warning("rag kb probe ambiguous kb_id=%s status=%s, keep existing (transient err)", kb_id, status)
         return True
+
+    async def get_always_include_context(self, project_id: str) -> tuple[str, list[dict]]:
+        await self._ensure_project(project_id)
+        files = await asyncio.to_thread(self.store.list_always_include_files, project_id)
+        if not files:
+            return "", []
+        parts: list[str] = []
+        sources: list[dict] = []
+        for f in files:
+            try:
+                text = Path(f["file_path"]).read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                logger.warning("always_include read failed file=%s err=%s", f["id"], e)
+                continue
+            if not text.strip():
+                continue
+            parts.append(
+                f"<always_included source=\"{f['name']}\">\n{text}\n</always_included>"
+            )
+            sources.append({
+                "file_id": f["id"],
+                "file_name": f["name"],
+                "score": 1.0,
+                "always_include": True,
+                "snippet": text[:200],
+            })
+        if not parts:
+            return "", []
+        header = (
+            "以下是标记为必含的专案知识文件（全量注入，不经检索召回）。"
+            "与用户指令冲突时以用户指令为准。"
+        )
+        return header + "\n\n" + "\n\n".join(parts), sources
 
     async def index_file(self, file_id: str) -> dict:
         kfile = self.store.get_knowledge_file(file_id)
@@ -179,9 +213,17 @@ class RAGCoordinator:
             return result if isinstance(result, list) else result.get("results", result.get("data", []))
 
         per_folder = await asyncio.gather(*[_search_one(p) for p in prefixes])
-        items = self._merge_results([it for it in per_folder if it], top_k=rag_top_k)
-        logger.info("rag query project=%s mode=%s folders=%d results=%d", project_id, rag_mode, len(prefixes), len(items))
-        return {"results": items, "mode": rag_mode}
+        raw_groups = [it for it in per_folder if it]
+        total_raw = sum(len(g) for g in raw_groups)
+        items = self._merge_results(raw_groups, top_k=rag_top_k)
+        below_threshold = max(0, total_raw - len(items))
+        metrics.record_rag_query(recalled=len(items), below_threshold=below_threshold)
+        sources = self._to_sources(items, project_id)
+        logger.info(
+            "rag query project=%s mode=%s folders=%d raw=%d recalled=%d below=%d",
+            project_id, rag_mode, len(prefixes), total_raw, len(items), below_threshold,
+        )
+        return {"results": items, "sources": sources, "mode": rag_mode}
 
     @staticmethod
     def _merge_results(groups: list[list], *, top_k: int) -> list:
@@ -203,6 +245,33 @@ class RAGCoordinator:
             return 0.0
         merged.sort(key=_score, reverse=True)
         return merged[:top_k]
+
+    def _to_sources(self, items: list, project_id: str) -> list[dict]:
+        files = {f["id"]: f for f in self.store.list_knowledge_files(project_id)}
+        by_doc: dict[str, str] = {f["rag_doc_id"]: f["name"] for f in files.values() if f.get("rag_doc_id")}
+        sources: list[dict] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            doc_id = it.get("doc_id") or it.get("id") or it.get("document_id")
+            file_name = (
+                it.get("doc_name") or it.get("name")
+                or by_doc.get(doc_id) or "unknown"
+            )
+            file_id = None
+            for fid, f in files.items():
+                if f.get("rag_doc_id") and f["rag_doc_id"] == doc_id:
+                    file_id = fid
+                    break
+            text = it.get("text") or it.get("content") or ""
+            sources.append({
+                "file_id": file_id,
+                "file_name": file_name,
+                "doc_id": doc_id,
+                "score": it.get("score"),
+                "snippet": text[:200] if text else "",
+            })
+        return sources
 
     async def remove_file_index(self, file_id: str) -> dict:
         kfile = self.store.get_knowledge_file(file_id)

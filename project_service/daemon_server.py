@@ -142,6 +142,7 @@ class ProjectRPCServer:
             "project.knowledge.file.get": self._kfile_get,
             "project.knowledge.file.delete": self._kfile_delete,
             "project.knowledge.file.statuses": self._kfile_statuses,
+        "project.knowledge.file.always_include": self._kfile_always_include,
             "project.agent.get": self._agent_get,
             "project.agent.set": self._agent_set,
             "project.agent.remove": self._agent_remove,
@@ -175,6 +176,8 @@ class ProjectRPCServer:
         rows = await self.project_manager.list(
             include_archived=bool(params.get("include_archived", False)),
             only_starred=bool(params.get("only_starred", False)),
+            limit=params.get("limit"),
+            offset=int(params.get("offset", 0)),
         )
         return [r.model_dump() for r in rows]
 
@@ -492,6 +495,12 @@ class ProjectRPCServer:
     async def _kfile_move(self, params: Any) -> dict:
         kfile = await self.knowledge_manager.move_file(
             params["file_id"], params.get("folder_id")
+        )
+        return kfile.model_dump()
+
+    async def _kfile_always_include(self, params: Any) -> dict:
+        kfile = await self.knowledge_manager.set_always_include(
+            params["file_id"], bool(params.get("always_include", True))
         )
         return kfile.model_dump()
 

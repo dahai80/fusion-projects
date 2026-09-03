@@ -145,6 +145,7 @@ python -m project_service.mcp_server    # 通过 stdin/stdout 通信
 | `project.knowledge.file.replace` | `{file_id, source_path}` | `KnowledgeFile` |
 | `project.knowledge.file.update` | `{file_id, name?, folder_id?}` | `KnowledgeFile` |
 | `project.knowledge.file.delete` | `{file_id}` | `{deleted: true}` |
+| `project.knowledge.file.always_include` | `{file_id, always_include?}` | `KnowledgeFile` |
 
 ### Agent 绑定
 
@@ -160,7 +161,7 @@ python -m project_service.mcp_server    # 通过 stdin/stdout 通信
 | 方法 | 参数 | 返回 |
 |---|---|---|
 | `project.rag.index` | `{project_id, folder_id}` | `{indexed, results}` |
-| `project.rag.query` | `{project_id, query, mode?, folder_ids?, top_k?, threshold?, chat_id?}` | 检索结果 |
+| `project.rag.query` | `{project_id, query, mode?, folder_ids?, top_k?, threshold?, chat_id?}` | `{results, sources, mode}` |
 | `project.rag.index.remove` | `{file_id}` | `{removed: true}` |
 | `project.rag.status` | `{project_id}` | 状态 |
 | `project.rag.config.get` | `{project_id}` | `{rag_mode, rag_top_k, rag_threshold}` |
@@ -210,7 +211,8 @@ asyncio.run(main())
 `POST|PATCH|DELETE /knowledge/folders/{id}` ·
 `GET /projects/{id}/knowledge/files` ·
 `POST /projects/{id}/knowledge/files/upload|replace` ·
-`PATCH|DELETE /knowledge/files/{id}`
+`PATCH|DELETE /knowledge/files/{id}` ·
+`POST /projects/{id}/knowledge/files/{file_id}/always-include`
 
 Agent：`POST /projects/{id}/agent` · `GET /projects/{id}/agent` ·
 `DELETE /projects/{id}/agent` · `POST /projects/{id}/system-prompt`
@@ -326,3 +328,22 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 - 每个模块使用 `logger = logging.getLogger(__name__)`；`logging.basicConfig`
   仅在入口点调用。
 - 4 空格缩进，无 docstring。
+
+## 变更日志
+
+### v0.5.1 — RAG 引用来源、always-include、分页、召回埋点
+基于 Claude Projects 深度对标的补齐（见 `insight/fusion-projects-insight-0903.md`），
+闭合 RAG 可追溯性与召回可观测性缺口：
+- **RAG 引用来源（sources 回传）**：`project.rag.query` 现返回 `sources` 数组
+  （`file_id`/`file_name`/`doc_id`/`score`/`snippet`）。SSE 聊天 `done` 事件携带
+  `sources`，前端可渲染可点击引用（对标 Claude Projects Citations）。
+  来源持久化到 `messages.rag_sources`，支持事后追溯。
+- **always-include 文件（绕过召回）**：新增 `knowledge_files.always_include`
+  列（schema v4）。标记文件**全文**注入 system 消息，绕过 top_k/threshold 召回，
+  消除"关键文件未被召回"问题。通过 RPC `project.knowledge.file.always_include`
+  与 REST `POST /knowledge/files/{id}/always-include` 切换。
+- **list_projects 分页**：store、`ProjectManager.list`、RPC `project.list`、
+  REST `GET /projects` 支持 `limit`/`offset`（默认 50）。
+- **召回质量埋点**：`metrics.record_rag_query` 记录
+  `rag_query_total`、`rag_avg_recall`、`rag_zero_recall`、`rag_below_threshold`，
+  通过 `/metrics` 暴露。召回质量从黑盒变为可观测、可调优。

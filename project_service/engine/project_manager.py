@@ -102,10 +102,14 @@ class ProjectManager:
         self,
         include_archived: bool = False,
         only_starred: bool = False,
+        limit: Optional[int] = None,
+        offset: int = 0,
     ) -> list[ProjectListItem]:
         rows = self.store.list_projects(
             include_archived=include_archived,
             only_starred=only_starred,
+            limit=limit,
+            offset=offset,
         )
         return [ProjectListItem.from_row(r) for r in rows]
 

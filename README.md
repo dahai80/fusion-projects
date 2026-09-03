@@ -197,7 +197,7 @@ python -m project_service.mcp_server    # communicates on stdin/stdout
 
 | Method | Params | Returns |
 |---|---|---|
-| `project.list` | `{include_archived?, only_starred?}` | `ProjectListItem[]` |
+| `project.list` | `{include_archived?, only_starred?, limit?, offset?}` | `ProjectListItem[]` |
 | `project.create` | `ProjectCreate` (name, description?, instructions?, template_id?) | `Project` (template_id copies instructions + knowledge folders/files + agent binding from template) |
 | `project.get` | `{project_id}` | `Project` |
 | `project.update` | `{project_id, fields: ProjectUpdate}` | `Project` |
@@ -255,6 +255,7 @@ python -m project_service.mcp_server    # communicates on stdin/stdout
 | `project.knowledge.file.replace` | `{file_id, source_path}` | `KnowledgeFile` |
 | `project.knowledge.file.update` | `{file_id, name?, folder_id?}` | `KnowledgeFile` |
 | `project.knowledge.file.delete` | `{file_id}` | `{deleted: true}` |
+| `project.knowledge.file.always_include` | `{file_id, always_include?}` | `KnowledgeFile` |
 
 ### Agent binding
 
@@ -270,7 +271,7 @@ python -m project_service.mcp_server    # communicates on stdin/stdout
 | Method | Params | Returns |
 |---|---|---|
 | `project.rag.index` | `{project_id, folder_id}` | `{indexed, results}` |
-| `project.rag.query` | `{project_id, query, mode?, folder_ids?, top_k?, threshold?, chat_id?}` | results |
+| `project.rag.query` | `{project_id, query, mode?, folder_ids?, top_k?, threshold?, chat_id?}` | `{results, sources, mode}` |
 | `project.rag.index.remove` | `{file_id}` | `{removed: true}` |
 | `project.rag.status` | `{project_id}` | status |
 | `project.rag.config.get` | `{project_id}` | `{rag_mode, rag_top_k, rag_threshold}` |
@@ -324,7 +325,8 @@ Knowledge: `GET /projects/{id}/knowledge/folders` ·
 `POST|PATCH|DELETE /knowledge/folders/{id}` ·
 `GET /projects/{id}/knowledge/files` ·
 `POST /projects/{id}/knowledge/files/upload|replace` ·
-`PATCH|DELETE /knowledge/files/{id}`
+`PATCH|DELETE /knowledge/files/{id}` ·
+`POST /projects/{id}/knowledge/files/{file_id}/always-include`
 
 Agent: `POST /projects/{id}/agent` · `GET /projects/{id}/agent` ·
 `DELETE /projects/{id}/agent` · `POST /projects/{id}/system-prompt`
@@ -536,8 +538,10 @@ export FUSION_REST_ALLOW_NO_AUTH=1
 - `GET /metrics` — public (auth-exempt) JSON snapshot of in-process counters:
   `total_requests`, `requests_by_status`, `rate_limit_rejected`, `auth_rejected`,
   `body_oversize_rejected`, live `upstream_health` (gateway/rag/agent-studio),
-  `auth` state, and the active `rate_limit` (limit + window). No Prometheus
-  dependency — poll with `curl` or scrape into any collector.
+  `auth` state, the active `rate_limit` (limit + window), and RAG recall
+  quality (`rag_query_total`, `rag_avg_recall`, `rag_zero_recall`,
+  `rag_below_threshold`). No Prometheus dependency — poll with `curl` or
+  scrape into any collector.
 - Rate limit default: **60 requests / 60 s per IP** (`FUSION_REST_RATE_LIMIT`,
   `FUSION_REST_RATE_WINDOW`), tuned for production. Override for higher throughput.
 - Per-module `logging` at INFO; `start.sh` / `rest_server.main()` attach
@@ -581,6 +585,26 @@ this service:
   → JSON-RPC −32011 / HTTP 502, so callers see a clear error, not a silent hang.
 
 ## Changelog
+
+### v0.5.1 — RAG citations, always-include, pagination, recall metrics
+Benchmark-driven pass against Claude Projects (see `insight/fusion-projects-insight-0903.md`).
+Closes the RAG-traceability and recall-observability gaps:
+- **RAG citations (sources回传)**: `project.rag.query` now returns a
+  `sources` array (`file_id`/`file_name`/`doc_id`/`score`/`snippet`) for
+  every recalled chunk. The SSE chat `done` event carries `sources` so the
+  frontend can render clickable citations (Claude-Projects-equivalent).
+  Sources are persisted to `messages.rag_sources` for post-hoc tracing.
+- **Always-include files (绕过召回)**: `knowledge_files.always_include`
+  column (schema v4). Marked files are injected **in full** into the system
+  message, bypassing top_k/threshold recall — eliminates "key file not
+  recalled" failures. Toggle via RPC `project.knowledge.file.always_include`
+  and REST `POST /knowledge/files/{id}/always-include`.
+- **list_projects pagination**: `limit`/`offset` (default 50) on store,
+  `ProjectManager.list`, RPC `project.list`, and REST `GET /projects`.
+- **Recall-quality metrics**: `metrics.record_rag_query` tracks
+  `rag_query_total`, `rag_avg_recall`, `rag_zero_recall`,
+  `rag_below_threshold` — surfaced in `/metrics`. Makes recall quality
+  observable and tunable (no longer a black box).
 
 ### v0.5.0 — fusion-identity multi-tenant integration
 - **Multi-tenant isolation**: REST surface is now identity-gated when

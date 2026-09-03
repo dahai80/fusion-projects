@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS knowledge_files (
     mime_type TEXT,
     rag_doc_id TEXT,
     index_status TEXT NOT NULL DEFAULT 'PENDING',
+    always_include INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -231,9 +232,13 @@ def _now() -> str:
 # schema version tracked via PRAGMA user_version. bump when a _migrate_* runs.
 # down-migrations (_ROLLBACK_SQL) restore the prior shape; for additive-only
 # changes the safe rollback is restoring the pre-migration SQLite file backup.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _ROLLBACK_SQL: dict[int, list[str]] = {
+    4: [
+        # _migrate_always_include added knowledge_files.always_include.
+        "ALTER TABLE knowledge_files DROP COLUMN always_include",
+    ],
     3: [
         # _migrate_tenant_id added projects.tenant_id. SQLite >= 3.35 DROP COLUMN.
         "ALTER TABLE projects DROP COLUMN tenant_id",
@@ -274,6 +279,7 @@ class ProjectStore:
             self._migrate_chat_project_id_nullable()
             self._migrate_snapshots()
             self._migrate_tenant_id()
+            self._migrate_always_include()
             cur = self._conn.execute("PRAGMA user_version")
             current = cur.fetchone()[0]
             if current < SCHEMA_VERSION:
@@ -343,6 +349,20 @@ class ProjectStore:
                 )
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id)"
+                )
+                self._conn.commit()
+
+    def _migrate_always_include(self) -> None:
+        with self._lock:
+            cur = self._conn.execute("PRAGMA table_info(knowledge_files)")
+            col_names = {c[1] for c in cur.fetchall()}
+            if "always_include" not in col_names:
+                logger.info("migrating knowledge_files: add always_include")
+                self._conn.execute(
+                    "ALTER TABLE knowledge_files ADD COLUMN always_include INTEGER NOT NULL DEFAULT 0"
+                )
+                self._conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_kfile_always ON knowledge_files(project_id, always_include)"
                 )
                 self._conn.commit()
 
@@ -466,6 +486,8 @@ class ProjectStore:
         self,
         include_archived: bool = False,
         only_starred: bool = False,
+        limit: Optional[int] = None,
+        offset: int = 0,
     ) -> list[dict]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -485,6 +507,9 @@ class ProjectStore:
             + where
             + " ORDER BY p.is_starred DESC, p.updated_at DESC"
         )
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([int(limit), int(offset)])
         with self._cursor() as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
@@ -853,6 +878,17 @@ class ProjectStore:
             r = cur.fetchone()
         return dict(r) if r else None
 
+    def set_message_rag_sources(self, message_id: str, sources_json: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute(
+                "UPDATE messages SET rag_sources=? WHERE id=?",
+                (sources_json, message_id),
+            )
+            updated = cur.rowcount
+        if updated:
+            logger.info("rag_sources set message=%s", message_id)
+        return updated > 0
+
     def list_messages(self, chat_id: str, limit: int = 100, offset: int = 0, keep_recent: bool = False) -> list[dict]:
         with self._cursor() as cur:
             if keep_recent:
@@ -1009,6 +1045,7 @@ class ProjectStore:
             "mime_type": data.get("mime_type"),
             "rag_doc_id": data.get("rag_doc_id"),
             "index_status": data.get("index_status", "PENDING"),
+            "always_include": data.get("always_include", 0),
             "created_at": now,
             "updated_at": now,
         }
@@ -1039,8 +1076,16 @@ class ProjectStore:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
 
+    def list_always_include_files(self, project_id: str) -> list[dict]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM knowledge_files WHERE project_id=? AND always_include=1 ORDER BY name",
+                (project_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     def update_knowledge_file(self, file_id: str, fields: dict) -> Optional[dict]:
-        allowed = {"folder_id", "name", "index_status", "rag_doc_id"}
+        allowed = {"folder_id", "name", "index_status", "rag_doc_id", "always_include"}
         clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not clean:
             return self.get_knowledge_file(file_id)

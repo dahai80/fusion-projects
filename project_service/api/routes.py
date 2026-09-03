@@ -104,9 +104,16 @@ def get_gateway_client(request: Request) -> GatewayClient:
 async def list_projects(
     include_archived: bool = False,
     only_starred: bool = False,
+    limit: Optional[int] = 50,
+    offset: int = 0,
     pm: ProjectManager = Depends(get_project_manager),
 ):
-    return await pm.list(include_archived=include_archived, only_starred=only_starred)
+    return await pm.list(
+        include_archived=include_archived,
+        only_starred=only_starred,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/projects", response_model=Project, status_code=201)
@@ -620,10 +627,10 @@ async def stream_message(
                 logger.warning("build_system_prompt failed project=%s chat=%s err=%s", project_id, chat_id, e)
                 return ""
 
-        async def _build_rag_ctx() -> str:
+        async def _build_rag_ctx() -> tuple[str, list[dict]]:
             rag_mode = payload.rag_mode or config.DEFAULT_RAG_MODE
             if rag_mode == "OFF":
-                return ""
+                return "", []
             try:
                 rag_result = await rc.query(
                     project_id,
@@ -633,19 +640,30 @@ async def stream_message(
                     chat_id=chat_id,
                 )
                 if isinstance(rag_result, dict) and "error" not in rag_result:
-                    return _format_rag_context(rag_result.get("results", []))
+                    ctx = _format_rag_context(rag_result.get("results", []))
+                    return ctx, rag_result.get("sources", [])
             except Exception as e:
                 logger.warning("rag query failed project=%s chat=%s err=%s", project_id, chat_id, e)
-            return ""
+            return "", []
 
-        sys_prompt, rag_ctx = await asyncio.gather(_build_sys_prompt(), _build_rag_ctx())
+        async def _build_always_include() -> tuple[str, list[dict]]:
+            try:
+                return await rc.get_always_include_context(project_id)
+            except Exception as e:
+                logger.warning("always_include build failed project=%s err=%s", project_id, e)
+                return "", []
+
+        sys_prompt, (rag_ctx, rag_sources), (ai_ctx, ai_sources) = await asyncio.gather(
+            _build_sys_prompt(), _build_rag_ctx(), _build_always_include()
+        )
+        all_sources: list[dict] = ai_sources + rag_sources
 
         history = await asyncio.to_thread(
             cm.store.list_messages, chat_id,
             limit=config.CHAT_HISTORY_LIMIT, keep_recent=True,
         )
         llm_messages = []
-        system_content = "\n\n".join(p for p in (sys_prompt, rag_ctx) if p).strip()
+        system_content = "\n\n".join(p for p in (sys_prompt, ai_ctx, rag_ctx) if p).strip()
         if system_content:
             llm_messages.append({"role": "system", "content": system_content})
         llm_messages += [{"role": m["role"], "content": m["content"]} for m in history]
@@ -687,7 +705,13 @@ async def stream_message(
                 await stream_iter.aclose()
                 assistant_content = "".join(collected)
                 if assistant_content and not disconnected:
-                    await cm.add_message(chat_id, MessageCreate(role="assistant", content=assistant_content))
+                    msg = await cm.add_message(chat_id, MessageCreate(role="assistant", content=assistant_content))
+                    if all_sources:
+                        try:
+                            sources_json = json.dumps(all_sources, ensure_ascii=False)
+                            cm.store.set_message_rag_sources(msg.id, sources_json)
+                        except Exception as e:
+                            logger.warning("rag_sources persist failed chat=%s err=%s", chat_id, e)
                     if config.IDENTITY_USAGE_REPORT:
                         try:
                             from fusion_core.tenant import current as _tenant_current
@@ -702,7 +726,7 @@ async def stream_message(
                         except Exception as e:
                             logger.warning("identity usage emit skipped: %s", e)
                 if not disconnected:
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'sources': all_sources}, ensure_ascii=False)}\n\n"
                 else:
                     yield f"data: {json.dumps({'type': 'cancelled'})}\n\n"
             except Exception as e:
@@ -932,6 +956,19 @@ async def list_file_statuses(
         return await km.list_file_statuses(project_id)
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="project not found")
+
+
+@router.post("/projects/{project_id}/knowledge/files/{file_id}/always-include", response_model=KnowledgeFile)
+async def set_always_include(
+    project_id: str,
+    file_id: str,
+    always_include: bool = True,
+    km: KnowledgeManager = Depends(get_knowledge_manager),
+):
+    try:
+        return await km.set_always_include(file_id, always_include)
+    except KnowledgeFileNotFound:
+        raise HTTPException(status_code=404, detail="file not found")
 
 
 # ── Agent binding endpoints ──

@@ -44,6 +44,7 @@ class KnowledgeFile(BaseModel):
     mime_type: Optional[str] = None
     rag_doc_id: Optional[str] = None
     index_status: str = "PENDING"
+    always_include: bool = False
     created_at: str
     updated_at: str
 
@@ -60,6 +61,7 @@ class KnowledgeFile(BaseModel):
             mime_type=row["mime_type"],
             rag_doc_id=row["rag_doc_id"],
             index_status=row["index_status"],
+            always_include=bool(row.get("always_include", 0)),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

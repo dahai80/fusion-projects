@@ -88,9 +88,9 @@ def test_migrate_down_rolls_back_additive_columns(store: ProjectStore):
     result = store.migrate_down(SCHEMA_VERSION - 1)
     assert result["rolled_to"] == SCHEMA_VERSION - 1
     conn = sqlite3.connect(str(store.db_path))
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(knowledge_files)")}
     conn.close()
-    assert "tenant_id" not in cols
+    assert "always_include" not in cols
     st2 = store.migrate_status()
     assert st2["current_version"] == SCHEMA_VERSION - 1
 
