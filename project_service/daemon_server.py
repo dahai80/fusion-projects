@@ -975,18 +975,9 @@ async def run_daemon(sock_path: Optional[str] = None) -> None:
 
 
 def main() -> None:
-    from logging.handlers import RotatingFileHandler
-    fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-    config.ensure_dirs()
-    fh = RotatingFileHandler(
-        str(config.LOG_DIR / "stdout.log"),
-        maxBytes=config.LOG_MAX_BYTES,
-        backupCount=config.LOG_BACKUP_COUNT,
-    )
-    fh.setFormatter(fmt)
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.addHandler(fh)
+    from project_service.logging_config import setup_logging
+
+    setup_logging(config.LOG_DIR / "stdout.log")
     try:
         asyncio.run(run_daemon())
     except KeyboardInterrupt:

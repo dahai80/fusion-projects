@@ -127,13 +127,26 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
+        rate_key = self._rate_key(request)
+        if not _get_rate_limiter().check(rate_key):
+            logger.warning("rest rate limit exceeded key=%s path=%s", rate_key, request.url.path)
+            metrics.record_rate_limit_reject()
+            return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"})
+        return await call_next(request)
+
+    @staticmethod
+    def _rate_key(request: Request) -> str:
+        try:
+            from fusion_core.tenant.context import current as _tenant_current
+
+            ctx = _tenant_current()
+        except Exception:
+            ctx = None
+        if ctx is not None and ctx.tenant_id:
+            return f"tenant:{ctx.tenant_id}"
         xff = request.headers.get("x-forwarded-for", "")
         if xff:
             client = xff.split(",")[0].strip() or "unknown"
         else:
             client = request.client.host if request.client else "unknown"
-        if not _get_rate_limiter().check(client):
-            logger.warning("rest rate limit exceeded client=%s path=%s", client, request.url.path)
-            metrics.record_rate_limit_reject()
-            return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"})
-        return await call_next(request)
+        return client

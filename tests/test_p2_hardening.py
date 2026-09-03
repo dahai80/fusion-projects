@@ -56,6 +56,94 @@ async def test_rate_limiter_evicts_at_ip_cap(monkeypatch):
     security.reset_rate_limiter()
 
 
+# ── P3: tenant-level rate limiting ──
+
+
+def test_rate_key_uses_tenant_when_context_present(monkeypatch):
+    from project_service.api import security
+    from fusion_core.tenant.context import TenantContext, set_context, reset as reset_ctx
+
+    ctx = TenantContext(tenant_id="tenant-42", user_id="u1")
+    token = set_context(ctx)
+    try:
+        key = security.RateLimitMiddleware._rate_key(
+            type("R", (), {"headers": {}, "client": type("C", (), {"host": "9.9.9.9"})()})()
+        )
+        assert key == "tenant:tenant-42"
+    finally:
+        reset_ctx(token)
+
+
+def test_rate_key_falls_back_to_ip_without_tenant():
+    from project_service.api import security
+
+    req = type("R", (), {"headers": {}, "client": type("C", (), {"host": "9.9.9.9"})()})()
+    assert security.RateLimitMiddleware._rate_key(req) == "9.9.9.9"
+
+
+def test_rate_key_honors_xff_without_tenant():
+    from project_service.api import security
+
+    req = type(
+        "R",
+        (),
+        {"headers": {"x-forwarded-for": "203.0.113.9, 10.0.0.1"}, "client": None},
+    )()
+    assert security.RateLimitMiddleware._rate_key(req) == "203.0.113.9"
+
+
+# ── P2: structured JSON logging ──
+
+
+def test_json_formatter_emits_tenant(monkeypatch, tmp_path):
+    import io
+    import logging
+
+    from project_service.logging_config import _JsonFormatter
+    from fusion_core.tenant.context import TenantContext, set_context, reset as reset_ctx
+
+    buf = io.StringIO()
+    h = logging.StreamHandler(buf)
+    h.setFormatter(_JsonFormatter())
+    lg = logging.getLogger("test_json_fmt")
+    lg.handlers = [h]
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    ctx = TenantContext(tenant_id="tenant-7", user_id="u7")
+    token = set_context(ctx)
+    try:
+        lg.info("hello %s", "world")
+    finally:
+        reset_ctx(token)
+    import json as _json
+
+    rec = _json.loads(buf.getvalue())
+    assert rec["msg"] == "hello world"
+    assert rec["tenant_id"] == "tenant-7"
+    assert rec["user_id"] == "u7"
+    assert rec["level"] == "INFO"
+
+
+def test_json_formatter_no_tenant():
+    import io
+    import json as _json
+    import logging
+
+    from project_service.logging_config import _JsonFormatter
+
+    buf = io.StringIO()
+    h = logging.StreamHandler(buf)
+    h.setFormatter(_JsonFormatter())
+    lg = logging.getLogger("test_json_fmt2")
+    lg.handlers = [h]
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    lg.info("plain message")
+    rec = _json.loads(buf.getvalue())
+    assert rec["msg"] == "plain message"
+    assert "tenant_id" not in rec
+
+
 # ── B9/E1: disk quota rejects upload ──
 
 

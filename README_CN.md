@@ -331,6 +331,19 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.5.2 — 结构化日志、租户级限流
+可观测性 + 多租户加固（对标清单 `insight/fusion-projects-insight-0903.md` §5.4 / §5.1）：
+- **结构化 JSON 日志（可选开启）**：`project_service/logging_config.py` 统一
+  日志初始化，内置 `RotatingFileHandler`（守护进程 + REST 入口共用）。设置
+  `FUSION_LOG_JSON=1` 输出单行 JSON 记录，含 `ts`/`level`/`name`/`msg`，租户
+  上下文活跃时附 `tenant_id`/`user_id`——可机器解析，无 Prometheus 依赖。默认
+  仍为文本格式。
+- **租户级限流**：`RateLimitMiddleware` 在多租户身份模式下以 `tenant:<id>`
+  作为限流键，而非客户端 IP。单用户模式不变（按 IP）。单个噪声租户不再耗尽
+  共享的 per-IP 桶。
+- 上游：已提 `fusion-rag#70`——rerank（bge-reranker-v2-m3）+ 混合检索
+  （BM25 + 向量），P1 召回质量缺口位于 fusion-rag 检索管线，非本服务。
+
 ### v0.5.1 — RAG 引用来源、always-include、分页、召回埋点
 基于 Claude Projects 深度对标的补齐（见 `insight/fusion-projects-insight-0903.md`），
 闭合 RAG 可追溯性与召回可观测性缺口：

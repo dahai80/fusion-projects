@@ -515,8 +515,10 @@ curl -s http://127.0.0.1:11440/ready   # confirm deps green before serving traff
 ```
 Logs: the daemon rotates `~/.fusion-projects/logs/stdout.log` in-process
 (`FUSION_LOG_MAX_BYTES` default 50 MiB, `FUSION_LOG_BACKUP_COUNT` default 5).
-`start.sh` writes only pre-handler boot output to `logs/boot.log` (project-local);
-runtime logs live under the data dir, not next to `start.sh`.
+Set `FUSION_LOG_JSON=1` to emit one-line JSON records (carrying `tenant_id`/
+`user_id` when a tenant context is active) instead of the default text
+formatter. `start.sh` writes only pre-handler boot output to `logs/boot.log`
+(project-local); runtime logs live under the data dir, not next to `start.sh`.
 
 REST API auth is **off by default**. Two guards:
 - **Fail-fast bind guard**: if `FUSION_REST_API_KEY` is unset, `FUSION_REST_ALLOW_NO_AUTH`
@@ -585,6 +587,23 @@ this service:
   → JSON-RPC −32011 / HTTP 502, so callers see a clear error, not a silent hang.
 
 ## Changelog
+
+### v0.5.2 — Structured logging, tenant-level rate limiting
+Observability + multi-tenant hardening from the benchmark backlog
+(`insight/fusion-projects-insight-0903.md` §5.4 / §5.1):
+- **Structured JSON logs (opt-in)**: `project_service/logging_config.py`
+  centralizes log setup with `RotatingFileHandler` (both daemon + REST
+  entrypoints). Set `FUSION_LOG_JSON=1` for one-line JSON records carrying
+  `ts`/`level`/`name`/`msg` + `tenant_id`/`user_id` when a tenant context is
+  active — machine-parseable, no Prometheus dep. Default stays the legacy
+  text formatter.
+- **Tenant-level rate limiting**: `RateLimitMiddleware` now keys the limiter
+  on `tenant:<id>` when a tenant context is present (multi-tenant identity
+  mode), instead of client IP. Single-user mode is unchanged (IP-keyed).
+  One noisy tenant can no longer exhaust the shared per-IP bucket.
+- Upstream: filed `fusion-rag#70` for rerank (bge-reranker-v2-m3) + hybrid
+  retrieval (BM25 + vector) — the P1 recall-quality gap that lives in the
+  fusion-rag retrieval pipeline, not in this service.
 
 ### v0.5.1 — RAG citations, always-include, pagination, recall metrics
 Benchmark-driven pass against Claude Projects (see `insight/fusion-projects-insight-0903.md`).
