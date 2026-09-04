@@ -101,10 +101,19 @@ DEFAULT_RAG_MODE = "AUTO"
 DEFAULT_RAG_TOP_K = 5
 DEFAULT_RAG_THRESHOLD = 0.65
 RAG_MAX_TOP_K = int(os.environ.get("FUSION_RAG_MAX_TOP_K", "50"))
+# cap folder fan-out in MANUAL RAG query: each folder_id spawns one concurrent
+# upstream search; an unbounded list (e.g. 1000 folders) would fan out 1000
+# parallel HTTP calls and exhaust the upstream. truncate beyond the cap.
+RAG_MAX_FOLDER_SCOPE = int(os.environ.get("FUSION_RAG_MAX_FOLDER_SCOPE", "32"))
 # cap how many messages fork_chat copies into the new chat. an unbounded fork
 # of a 100k-message chat would load the entire history into memory + one giant
 # batch insert; cap it and warn-truncate beyond the cap.
 FORK_MAX_MESSAGES = int(os.environ.get("FUSION_FORK_MAX_MESSAGES", "5000"))
+# cap messages dumped into a chat snapshot. an unbounded dump of a 100k-message
+# chat serializes every message into one JSON blob column, blowing memory + the
+# 16MB UDS line limit before any guard fires. keep the most-recent cap; older
+# history stays in the live messages table, recoverable via list_messages.
+SNAPSHOT_MAX_MESSAGES = int(os.environ.get("FUSION_SNAPSHOT_MAX_MESSAGES", "5000"))
 DEFAULT_PROMPT_MERGE = "AGENT_FIRST"
 MAX_INSTRUCTION_CHARS = 10000
 

@@ -309,6 +309,17 @@ class ProjectStore:
             self._migrate_always_include()
             cur = self._conn.execute("PRAGMA user_version")
             current = cur.fetchone()[0]
+            if current > SCHEMA_VERSION:
+                # DB was created by newer code (e.g. after a release rollback).
+                # silently accepting a newer schema risks partial-row writes and
+                # broken constraints this older binary doesn't understand. fail
+                # fast so the operator restores a matching backup instead of
+                # corrupting data.
+                raise RuntimeError(
+                    f"DB schema user_version {current} is newer than code "
+                    f"SCHEMA_VERSION {SCHEMA_VERSION}; refusing to start. "
+                    f"Restore a DB from a matching release or upgrade the binary."
+                )
             if current < SCHEMA_VERSION:
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 logger.info("schema user_version set %d -> %d", current, SCHEMA_VERSION)
@@ -579,6 +590,10 @@ class ProjectStore:
             return [dict(r) for r in cur.fetchall()]
 
     def update_project(self, project_id: str, fields: dict) -> Optional[dict]:
+        try:
+            self.assert_project_owned(project_id)
+        except TenantMismatch:
+            return None
         if self.get_project(project_id) is None:
             return None
         clean = {k: v for k, v in fields.items() if k in ALLOWED_UPDATE_FIELDS and v is not None}
@@ -596,6 +611,10 @@ class ProjectStore:
         return self.get_project(project_id)
 
     def set_archived(self, project_id: str, archived: bool) -> Optional[dict]:
+        try:
+            self.assert_project_owned(project_id)
+        except TenantMismatch:
+            return None
         if self.get_project(project_id) is None:
             return None
         with self._cursor() as cur:
@@ -609,6 +628,10 @@ class ProjectStore:
         return self.get_project(project_id)
 
     def set_starred(self, project_id: str, starred: bool) -> Optional[dict]:
+        try:
+            self.assert_project_owned(project_id)
+        except TenantMismatch:
+            return None
         if self.get_project(project_id) is None:
             return None
         with self._cursor() as cur:
@@ -622,6 +645,10 @@ class ProjectStore:
         return self.get_project(project_id)
 
     def delete_project(self, project_id: str) -> bool:
+        try:
+            self.assert_project_owned(project_id)
+        except TenantMismatch:
+            return False
         if self.get_project(project_id) is None:
             return False
         with self._cursor() as cur:
@@ -632,6 +659,7 @@ class ProjectStore:
         return deleted > 0
 
     def get_instructions(self, project_id: str) -> Optional[dict]:
+        self.assert_project_owned(project_id)
         with self._cursor() as cur:
             cur.execute(
                 "SELECT * FROM instructions WHERE project_id=? ORDER BY updated_at DESC LIMIT 1",
@@ -641,6 +669,7 @@ class ProjectStore:
         return dict(r) if r else None
 
     def save_instructions(self, project_id: str, content: str) -> dict:
+        self.assert_project_owned(project_id)
         existing = self.get_instructions(project_id)
         now = _now()
         if existing:
@@ -661,6 +690,7 @@ class ProjectStore:
         return self.get_instructions(project_id)
 
     def clear_instructions(self, project_id: str) -> bool:
+        self.assert_project_owned(project_id)
         with self._cursor() as cur:
             cur.execute("DELETE FROM instructions WHERE project_id=?", (project_id,))
             deleted = cur.rowcount
@@ -674,6 +704,7 @@ class ProjectStore:
         content: str,
         label: Optional[str] = None,
     ) -> dict:
+        self.assert_project_owned(project_id)
         sid = uuid.uuid4().hex
         now = _now()
         label_val = label if label is not None else "auto"
@@ -692,11 +723,18 @@ class ProjectStore:
         logger.info("snapshotted instruction project=%s label=%s", project_id, label_val)
         return row
 
-    def list_snapshots(self, project_id: str) -> list[dict]:
+    def list_snapshots(
+        self,
+        project_id: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        self.assert_project_owned(project_id)
+        lim, off = _paginate(limit, offset)
         with self._cursor() as cur:
             cur.execute(
-                "SELECT * FROM instruction_snapshots WHERE project_id=? ORDER BY created_at DESC",
-                (project_id,),
+                "SELECT * FROM instruction_snapshots WHERE project_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (project_id, lim, off),
             )
             return [dict(r) for r in cur.fetchall()]
 
@@ -714,6 +752,9 @@ class ProjectStore:
         return row
 
     def delete_snapshot(self, snapshot_id: str) -> bool:
+        existing = self.get_snapshot(snapshot_id)
+        if not existing:
+            return False
         with self._cursor() as cur:
             cur.execute("DELETE FROM instruction_snapshots WHERE id=?", (snapshot_id,))
             deleted = cur.rowcount
@@ -722,6 +763,7 @@ class ProjectStore:
         return deleted > 0
 
     def create_artifact_ref(self, data: dict) -> dict:
+        self.assert_project_owned(data["project_id"])
         aid = data.get("id") or uuid.uuid4().hex
         now = _now()
         row = {
@@ -777,7 +819,10 @@ class ProjectStore:
         artifact_type: Optional[str] = None,
         artifact_kind: Optional[str] = None,
         search: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
     ) -> list[dict]:
+        self.assert_project_owned(project_id)
         clauses = ["project_id=?"]
         params: list[Any] = [project_id]
         if artifact_type:
@@ -790,12 +835,17 @@ class ProjectStore:
             clauses.append("artifact_name LIKE ?")
             params.append(f"%{search}%")
         where = " AND ".join(clauses)
-        sql = f"SELECT * FROM project_artifacts WHERE {where} ORDER BY migrated_at DESC"
+        lim, off = _paginate(limit, offset)
+        sql = f"SELECT * FROM project_artifacts WHERE {where} ORDER BY migrated_at DESC LIMIT ? OFFSET ?"
+        params += [lim, off]
         with self._cursor() as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
 
     def remove_artifact_ref(self, artifact_id: str) -> bool:
+        existing = self.get_artifact_ref(artifact_id)
+        if not existing:
+            return False
         with self._cursor() as cur:
             cur.execute("DELETE FROM project_artifacts WHERE artifact_id=?", (artifact_id,))
             deleted = cur.rowcount
@@ -804,6 +854,7 @@ class ProjectStore:
         return deleted > 0
 
     def count_artifact_refs(self, project_id: str) -> int:
+        self.assert_project_owned(project_id)
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM project_artifacts WHERE project_id=?", (project_id,))
             return cur.fetchone()[0]
@@ -811,6 +862,7 @@ class ProjectStore:
     # ── Chat CRUD ──
 
     def create_chat(self, data: dict) -> dict:
+        self.assert_project_owned(data["project_id"])
         cid = data.get("id") or uuid.uuid4().hex
         now = _now()
         row = {
@@ -854,18 +906,38 @@ class ProjectStore:
             r = cur.fetchone()
         return r[0] if r else None
 
-    def list_chats(self, project_id: str, only_starred: bool = False) -> list[dict]:
+    def _assert_chat_owned(self, chat_id: str) -> Optional[str]:
+        # store self-defense for chat_id-keyed accessors: resolve project_id from
+        # the chat row then run the tenant chokepoint. returns the project_id so
+        # callers can reuse it. no-op when no tenant context (single-user mode).
+        pid = self._chat_project_id(chat_id)
+        if pid is None:
+            return None
+        self.assert_project_owned(pid)
+        return pid
+
+    def list_chats(
+        self,
+        project_id: str,
+        only_starred: bool = False,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        self.assert_project_owned(project_id)
         clauses = ["project_id=?"]
         params: list[Any] = [project_id]
         if only_starred:
             clauses.append("is_starred=1")
         where = " WHERE " + " AND ".join(clauses)
-        sql = f"SELECT * FROM chats{where} ORDER BY is_starred DESC, updated_at DESC"
+        lim, off = _paginate(limit, offset)
+        sql = f"SELECT * FROM chats{where} ORDER BY is_starred DESC, updated_at DESC LIMIT ? OFFSET ?"
+        params += [lim, off]
         with self._cursor() as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
 
     def update_chat(self, chat_id: str, fields: dict) -> Optional[dict]:
+        self._assert_chat_owned(chat_id)
         allowed = {"title", "is_starred", "agent_id", "project_id"}
         clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not clean:
@@ -882,6 +954,7 @@ class ProjectStore:
         return self.get_chat(chat_id)
 
     def delete_chat(self, chat_id: str) -> bool:
+        self._assert_chat_owned(chat_id)
         with self._cursor() as cur:
             cur.execute("DELETE FROM chats WHERE id=?", (chat_id,))
             deleted = cur.rowcount
@@ -890,6 +963,7 @@ class ProjectStore:
         return deleted > 0
 
     def detach_chat(self, chat_id: str) -> Optional[dict]:
+        self._assert_chat_owned(chat_id)
         with self._cursor() as cur:
             cur.execute(
                 "UPDATE chats SET project_id=NULL, updated_at=? WHERE id=?",
@@ -903,6 +977,7 @@ class ProjectStore:
     # ── Chat Snapshot ──
 
     def create_chat_snapshot(self, data: dict) -> dict:
+        self._assert_chat_owned(data["chat_id"])
         sid = data.get("id") or uuid.uuid4().hex
         now = _now()
         row = {
@@ -925,11 +1000,18 @@ class ProjectStore:
         logger.info("created chat_snapshot id=%s chat=%s", sid, data["chat_id"])
         return row
 
-    def list_chat_snapshots(self, chat_id: str) -> list[dict]:
+    def list_chat_snapshots(
+        self,
+        chat_id: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        self._assert_chat_owned(chat_id)
+        lim, off = _paginate(limit, offset)
         with self._cursor() as cur:
             cur.execute(
-                "SELECT * FROM chat_snapshots WHERE chat_id=? ORDER BY created_at DESC",
-                (chat_id,),
+                "SELECT * FROM chat_snapshots WHERE chat_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (chat_id, lim, off),
             )
             return [dict(r) for r in cur.fetchall()]
 
@@ -950,6 +1032,11 @@ class ProjectStore:
 
     def delete_chat_snapshot(self, snapshot_id: str) -> bool:
         with self._cursor() as cur:
+            cur.execute("SELECT chat_id FROM chat_snapshots WHERE id=?", (snapshot_id,))
+            r = cur.fetchone()
+        if r:
+            self._assert_chat_owned(r[0])
+        with self._cursor() as cur:
             cur.execute("DELETE FROM chat_snapshots WHERE id=?", (snapshot_id,))
             deleted = cur.rowcount
         if deleted:
@@ -959,6 +1046,7 @@ class ProjectStore:
     # ── Message CRUD ──
 
     def create_message(self, data: dict) -> dict:
+        self._assert_chat_owned(data["chat_id"])
         mid = data.get("id") or uuid.uuid4().hex
         now = _now()
         row = {
@@ -1001,6 +1089,11 @@ class ProjectStore:
 
     def set_message_rag_sources(self, message_id: str, sources_json: str) -> bool:
         with self._cursor() as cur:
+            cur.execute("SELECT chat_id FROM messages WHERE id=?", (message_id,))
+            r = cur.fetchone()
+        if r:
+            self._assert_chat_owned(r[0])
+        with self._cursor() as cur:
             cur.execute(
                 "UPDATE messages SET rag_sources=? WHERE id=?",
                 (sources_json, message_id),
@@ -1011,6 +1104,7 @@ class ProjectStore:
         return updated > 0
 
     def list_messages(self, chat_id: str, limit: int = 100, offset: int = 0, keep_recent: bool = False) -> list[dict]:
+        self._assert_chat_owned(chat_id)
         lim, off = _paginate(limit, offset)
         with self._cursor() as cur:
             if keep_recent:
@@ -1029,21 +1123,33 @@ class ProjectStore:
             return [dict(r) for r in cur.fetchall()]
 
     def count_messages(self, chat_id: str) -> int:
+        self._assert_chat_owned(chat_id)
         with self._cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM messages WHERE chat_id=?", (chat_id,))
             return cur.fetchone()[0]
 
-    def dump_chat_messages(self, chat_id: str) -> str:
+    def dump_chat_messages(self, chat_id: str, limit: Optional[int] = None) -> str:
+        self._assert_chat_owned(chat_id)
         import json
+        cap = limit if limit is not None else config.SNAPSHOT_MAX_MESSAGES
         with self._cursor() as cur:
             cur.execute(
-                "SELECT id, role, content, created_at FROM messages WHERE chat_id=? ORDER BY created_at ASC",
-                (chat_id,),
+                "SELECT id, role, content, created_at FROM ("
+                " SELECT * FROM messages WHERE chat_id=? ORDER BY created_at DESC LIMIT ?"
+                ") ORDER BY created_at ASC",
+                (chat_id, cap),
             )
             rows = [dict(r) for r in cur.fetchall()]
+        if len(rows) >= cap:
+            logger.warning("dump_chat_messages capped chat=%s cap=%d (older history kept in messages table)", chat_id, cap)
         return json.dumps(rows, ensure_ascii=False)
 
     def delete_message(self, message_id: str) -> bool:
+        with self._cursor() as cur:
+            cur.execute("SELECT chat_id FROM messages WHERE id=?", (message_id,))
+            r = cur.fetchone()
+        if r:
+            self._assert_chat_owned(r[0])
         with self._cursor() as cur:
             cur.execute("DELETE FROM messages WHERE id=?", (message_id,))
             deleted = cur.rowcount
@@ -1052,6 +1158,7 @@ class ProjectStore:
         return deleted > 0
 
     def create_messages_batch(self, chat_id: str, rows: list[dict]) -> int:
+        self._assert_chat_owned(chat_id)
         if not rows:
             return 0
         now = _now()
@@ -1073,6 +1180,7 @@ class ProjectStore:
         return len(payload)
 
     def replace_chat_messages(self, chat_id: str, rows: list[dict]) -> int:
+        self._assert_chat_owned(chat_id)
         # atomic: DELETE + INSERT + UPDATE chats in one transaction. do NOT
         # call create_messages_batch (it opens its own _cursor/commit) — inline
         # the insert so all three statements share one commit.
@@ -1129,6 +1237,7 @@ class ProjectStore:
                     cur_id = r["parent_id"] if r else None
 
     def create_folder(self, data: dict) -> dict:
+        self.assert_project_owned(data["project_id"])
         fid = data.get("id") or uuid.uuid4().hex
         now = _now()
         parent_id = data.get("parent_id")
@@ -1164,26 +1273,34 @@ class ProjectStore:
             return None
         return row
 
-    def list_folders(self, project_id: str, parent_id: Optional[str] = None) -> list[dict]:
+    def list_folders(
+        self,
+        project_id: str,
+        parent_id: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        self.assert_project_owned(project_id)
+        lim, off = _paginate(limit, offset)
         if parent_id is not None:
-            sql = "SELECT * FROM knowledge_folders WHERE project_id=? AND parent_id=? ORDER BY sort_order, name"
-            params: list[Any] = [project_id, parent_id]
+            sql = "SELECT * FROM knowledge_folders WHERE project_id=? AND parent_id=? ORDER BY sort_order, name LIMIT ? OFFSET ?"
+            params: list[Any] = [project_id, parent_id, lim, off]
         else:
-            sql = "SELECT * FROM knowledge_folders WHERE project_id=? ORDER BY sort_order, name"
-            params = [project_id]
+            sql = "SELECT * FROM knowledge_folders WHERE project_id=? ORDER BY sort_order, name LIMIT ? OFFSET ?"
+            params = [project_id, lim, off]
         with self._cursor() as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
 
     def update_folder(self, folder_id: str, fields: dict) -> Optional[dict]:
+        existing = self.get_folder(folder_id)
+        if not existing:
+            return None
         allowed = {"name", "parent_id", "sort_order"}
         clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not clean:
             return self.get_folder(folder_id)
         if "parent_id" in clean:
-            existing = self.get_folder(folder_id)
-            if not existing:
-                return None
             self._validate_folder_parent(existing["project_id"], clean["parent_id"], self_id=folder_id)
         sets = ",".join(f"{k}=?" for k in clean)
         vals = list(clean.values()) + [folder_id]
@@ -1196,6 +1313,9 @@ class ProjectStore:
         return self.get_folder(folder_id)
 
     def delete_folder(self, folder_id: str) -> bool:
+        existing = self.get_folder(folder_id)
+        if not existing:
+            return False
         with self._cursor() as cur:
             cur.execute("DELETE FROM knowledge_folders WHERE id=?", (folder_id,))
             deleted = cur.rowcount
@@ -1206,6 +1326,7 @@ class ProjectStore:
     # ── Knowledge File CRUD ──
 
     def create_knowledge_file(self, data: dict) -> dict:
+        self.assert_project_owned(data["project_id"])
         fid = data.get("id") or uuid.uuid4().hex
         now = _now()
         folder_id = data.get("folder_id")
@@ -1252,18 +1373,27 @@ class ProjectStore:
             return None
         return row
 
-    def list_knowledge_files(self, project_id: str, folder_id: Optional[str] = None) -> list[dict]:
+    def list_knowledge_files(
+        self,
+        project_id: str,
+        folder_id: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        self.assert_project_owned(project_id)
+        lim, off = _paginate(limit, offset)
         if folder_id is not None:
-            sql = "SELECT * FROM knowledge_files WHERE project_id=? AND folder_id=? ORDER BY name"
-            params: list[Any] = [project_id, folder_id]
+            sql = "SELECT * FROM knowledge_files WHERE project_id=? AND folder_id=? ORDER BY name LIMIT ? OFFSET ?"
+            params: list[Any] = [project_id, folder_id, lim, off]
         else:
-            sql = "SELECT * FROM knowledge_files WHERE project_id=? ORDER BY name"
-            params = [project_id]
+            sql = "SELECT * FROM knowledge_files WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?"
+            params = [project_id, lim, off]
         with self._cursor() as cur:
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
 
     def list_always_include_files(self, project_id: str) -> list[dict]:
+        self.assert_project_owned(project_id)
         with self._cursor() as cur:
             cur.execute(
                 "SELECT * FROM knowledge_files WHERE project_id=? AND always_include=1 ORDER BY name",
@@ -1272,14 +1402,14 @@ class ProjectStore:
             return [dict(r) for r in cur.fetchall()]
 
     def update_knowledge_file(self, file_id: str, fields: dict) -> Optional[dict]:
+        existing = self.get_knowledge_file(file_id)
+        if not existing:
+            return None
         allowed = {"folder_id", "name", "index_status", "rag_doc_id", "always_include"}
         clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not clean:
-            return self.get_knowledge_file(file_id)
+            return existing
         if "folder_id" in clean and clean["folder_id"]:
-            existing = self.get_knowledge_file(file_id)
-            if not existing:
-                return None
             self._validate_folder_parent(existing["project_id"], clean["folder_id"])
         clean["updated_at"] = _now()
         sets = ",".join(f"{k}=?" for k in clean)
@@ -1293,6 +1423,9 @@ class ProjectStore:
         return self.get_knowledge_file(file_id)
 
     def delete_knowledge_file(self, file_id: str) -> bool:
+        existing = self.get_knowledge_file(file_id)
+        if not existing:
+            return False
         with self._cursor() as cur:
             cur.execute("DELETE FROM knowledge_files WHERE id=?", (file_id,))
             deleted = cur.rowcount
@@ -1303,6 +1436,7 @@ class ProjectStore:
     # ── Chat Agent Binding CRUD ──
 
     def create_binding(self, data: dict) -> dict:
+        self.assert_project_owned(data["project_id"])
         bid = data.get("id") or uuid.uuid4().hex
         now = _now()
         row = {
@@ -1351,6 +1485,7 @@ class ProjectStore:
         return row
 
     def get_binding_by_project(self, project_id: str) -> Optional[dict]:
+        self.assert_project_owned(project_id)
         with self._cursor() as cur:
             cur.execute(
                 "SELECT * FROM chat_agent_bindings WHERE project_id=? AND chat_id IS NULL",
@@ -1360,6 +1495,9 @@ class ProjectStore:
         return dict(r) if r else None
 
     def update_binding(self, binding_id: str, fields: dict) -> Optional[dict]:
+        existing = self.get_binding(binding_id)
+        if not existing:
+            return None
         allowed = {"agent_id", "merge_mode"}
         clean = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not clean:
@@ -1376,6 +1514,9 @@ class ProjectStore:
         return self.get_binding(binding_id)
 
     def delete_binding(self, binding_id: str) -> bool:
+        existing = self.get_binding(binding_id)
+        if not existing:
+            return False
         with self._cursor() as cur:
             cur.execute("DELETE FROM chat_agent_bindings WHERE id=?", (binding_id,))
             deleted = cur.rowcount
@@ -1386,6 +1527,7 @@ class ProjectStore:
     # ── RAG Query ──
 
     def create_rag_query(self, data: dict) -> dict:
+        self.assert_project_owned(data["project_id"])
         qid = data.get("id") or uuid.uuid4().hex
         now = _now()
         row = {
@@ -1413,6 +1555,7 @@ class ProjectStore:
     # ── Temp Attachment CRUD ──
 
     def create_temp_attachment(self, data: dict) -> dict:
+        self._assert_chat_owned(data["chat_id"])
         aid = data.get("id") or uuid.uuid4().hex
         now = _now()
         row = {
@@ -1434,11 +1577,18 @@ class ProjectStore:
         logger.info("created temp_attachment id=%s chat=%s name=%s", aid, data["chat_id"], data["original_name"])
         return row
 
-    def list_temp_attachments(self, chat_id: str) -> list[dict]:
+    def list_temp_attachments(
+        self,
+        chat_id: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> list[dict]:
+        self._assert_chat_owned(chat_id)
+        lim, off = _paginate(limit, offset)
         with self._cursor() as cur:
             cur.execute(
-                "SELECT * FROM temp_attachments WHERE chat_id=? ORDER BY created_at ASC",
-                (chat_id,),
+                "SELECT * FROM temp_attachments WHERE chat_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+                (chat_id, lim, off),
             )
             return [dict(r) for r in cur.fetchall()]
 
@@ -1458,6 +1608,9 @@ class ProjectStore:
         return row
 
     def delete_temp_attachment(self, attachment_id: str) -> bool:
+        existing = self.get_temp_attachment(attachment_id)
+        if not existing:
+            return False
         with self._cursor() as cur:
             cur.execute("DELETE FROM temp_attachments WHERE id=?", (attachment_id,))
             deleted = cur.rowcount
@@ -1468,6 +1621,7 @@ class ProjectStore:
     # ── Audit Log ──
 
     def create_audit_log(self, data: dict) -> dict:
+        self.assert_project_owned(data["project_id"])
         aid = data.get("id") or uuid.uuid4().hex
         now = _now()
         row = {
@@ -1495,6 +1649,7 @@ class ProjectStore:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
+        self.assert_project_owned(project_id)
         lim, off = _paginate(limit, offset)
         with self._cursor() as cur:
             cur.execute(

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 
@@ -27,43 +28,43 @@ class InstructionEngine:
 
     async def get(self, project_id: str) -> InstructionContent:
         await self.project_manager.get(project_id)
-        row = self.store.get_instructions(project_id)
+        row = await asyncio.to_thread(self.store.get_instructions, project_id)
         if not row:
             return InstructionContent(project_id=project_id, content="")
         return InstructionContent.from_row(row)
 
     async def save(self, project_id: str, payload: InstructionSave) -> InstructionContent:
         await self.project_manager.get(project_id)
-        existing = self.store.get_instructions(project_id)
+        existing = await asyncio.to_thread(self.store.get_instructions, project_id)
         if existing and existing["content"] and existing["content"] != payload.content:
-            self.store.snapshot_instruction(project_id, existing["content"], label="auto")
-        row = self.store.save_instructions(project_id, payload.content)
+            await asyncio.to_thread(self.store.snapshot_instruction, project_id, existing["content"], "auto")
+        row = await asyncio.to_thread(self.store.save_instructions, project_id, payload.content)
         logger.info("instructions saved project=%s len=%d", project_id, len(payload.content))
         return InstructionContent.from_row(row)
 
     async def clear(self, project_id: str) -> bool:
         await self.project_manager.get(project_id)
-        return self.store.clear_instructions(project_id)
+        return await asyncio.to_thread(self.store.clear_instructions, project_id)
 
     async def list_snapshots(self, project_id: str) -> list[InstructionSnapshot]:
         await self.project_manager.get(project_id)
-        rows = self.store.list_snapshots(project_id)
+        rows = await asyncio.to_thread(self.store.list_snapshots, project_id)
         return [InstructionSnapshot.from_row(r) for r in rows]
 
     async def restore_snapshot(self, snapshot_id: str) -> InstructionContent:
-        snap = self.store.get_snapshot(snapshot_id)
+        snap = await asyncio.to_thread(self.store.get_snapshot, snapshot_id)
         if not snap:
             raise SnapshotNotFound(snapshot_id)
         await self.project_manager.get(snap["project_id"])
-        existing = self.store.get_instructions(snap["project_id"])
+        existing = await asyncio.to_thread(self.store.get_instructions, snap["project_id"])
         if existing and existing["content"] and existing["content"] != snap["content"]:
-            self.store.snapshot_instruction(snap["project_id"], existing["content"], label="pre-restore")
-        row = self.store.save_instructions(snap["project_id"], snap["content"])
+            await asyncio.to_thread(self.store.snapshot_instruction, snap["project_id"], existing["content"], "pre-restore")
+        row = await asyncio.to_thread(self.store.save_instructions, snap["project_id"], snap["content"])
         logger.info("restored instruction snapshot=%s project=%s", snapshot_id, snap["project_id"])
         return InstructionContent.from_row(row)
 
     async def delete_snapshot(self, snapshot_id: str) -> bool:
-        snap = self.store.get_snapshot(snapshot_id)
+        snap = await asyncio.to_thread(self.store.get_snapshot, snapshot_id)
         if not snap:
             raise SnapshotNotFound(snapshot_id)
         # ownership check: get_snapshot already runs assert_project_owned (returns
@@ -71,6 +72,6 @@ class InstructionEngine:
         # the access check uniform with restore_snapshot and re-validates the
         # project still exists before we mutate.
         await self.project_manager.get(snap["project_id"])
-        deleted = self.store.delete_snapshot(snapshot_id)
+        deleted = await asyncio.to_thread(self.store.delete_snapshot, snapshot_id)
         logger.info("deleted instruction snapshot=%s deleted=%s", snapshot_id, deleted)
         return deleted

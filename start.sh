@@ -85,12 +85,21 @@ do_stop() {
     fi
     local pid
     pid="$(cat "$PID_FILE")"
-    kill "$pid" 2>/dev/null || true
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.3
+    # M13: graceful drain. SIGTERM lets the daemon finish in-flight requests
+    # (serve() catches SIGTERM -> stop_event -> server.close() -> gateway close).
+    # poll up to 30s for the process to exit so a busy service isn't SIGKILLed
+    # mid-request; only force-kill if it hangs past the drain window.
+    kill -TERM "$pid" 2>/dev/null || true
+    local drained=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$drained" -ge 60 ]; then
+            echo "drain exceeded 30s, force-killing pid $pid"
+            kill -9 "$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 0.5
+        drained=$((drained + 1))
     done
-    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
     rm -f "$PID_FILE" "$SOCK_PATH"
     rmdir "$PID_FILE.lock" 2>/dev/null || true
     exec 9>&- 2>/dev/null || true
@@ -106,10 +115,56 @@ do_status() {
     fi
 }
 
+# M9: online backup. sqlite3 .backup takes a consistent snapshot of a WAL db
+# without blocking writers (safe while the daemon is running); the storage
+# tree is tarred alongside. output dir defaults under the data home so backups
+# live with the data they protect. pass a destination dir as $2 to override.
+do_backup() {
+    local out_dir="${2:-}"
+    if [ -z "$out_dir" ]; then
+        local home_dir
+        home_dir="${FUSION_PROJECT_HOME:-$HOME/.fusion-projects}"
+        out_dir="$home_dir/backups"
+    fi
+    mkdir -p "$out_dir"
+    local ts
+    # portable seconds-since-epoch; the stamp is the backup identity.
+    ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo "manual")"
+    local dest="$out_dir/backup-$ts"
+    mkdir -p "$dest"
+    local home_dir
+    home_dir="${FUSION_PROJECT_HOME:-$HOME/.fusion-projects}"
+    local db="$home_dir/data/projects.db"
+    local storage="$home_dir/storage"
+    if [ ! -f "$db" ]; then
+        echo "backup: db not found at $db, nothing to back up" >&2
+        return 1
+    fi
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "backup: sqlite3 not installed, cannot take online snapshot" >&2
+        return 1
+    fi
+    # online backup: safe under concurrent writers (WAL). never copy the db
+    # file directly — a live copy can catch a half-written page.
+    sqlite3 "$db" ".backup '$dest/projects.db'" || {
+        echo "backup: sqlite3 .backup failed" >&2
+        return 1
+    }
+    if [ -d "$storage" ]; then
+        tar -C "$home_dir" -czf "$dest/storage.tar.gz" storage 2>/dev/null || {
+            echo "backup: storage tar failed (continuing with db snapshot)" >&2
+        }
+    fi
+    local size
+    size="$(du -sh "$dest" 2>/dev/null | cut -f1 || echo "?")"
+    echo "backup complete: $dest ($size)"
+}
+
 case "${1:-status}" in
     start)   do_start ;;
     stop)    do_stop ;;
     restart) do_stop; do_start ;;
     status)  do_status ;;
-    *) echo "Usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
+    backup)  do_backup "$@" ;;
+    *) echo "Usage: $0 {start|stop|restart|status|backup [dest_dir]}" >&2; exit 1 ;;
 esac

@@ -30,23 +30,43 @@ class RAGCoordinator:
         self.store = store or ProjectStore()
         self.project_manager = project_manager or ProjectManager()
         self.upstream = upstream or GatewayClient()
-        self._kb_lock = asyncio.Lock()
+        # per-project create-locks: serialize kb creation for ONE project (so 8
+        # concurrent index_file calls don't race to create 8 kbs) while letting
+        # different projects create concurrently. replaces the single global
+        # _kb_lock that serialized all projects behind one HTTP call (M6).
+        self._kb_create_locks: dict[str, asyncio.Lock] = {}
         self._index_sem = asyncio.Semaphore(config.RAG_INDEX_CONCURRENCY)
 
     async def _ensure_project(self, project_id: str) -> None:
-        row = self.store.get_project(project_id)
+        row = await asyncio.to_thread(self.store.get_project, project_id)
         if not row:
             raise ProjectNotFound(project_id)
 
+    def _kb_create_lock(self, project_id: str) -> asyncio.Lock:
+        lock = self._kb_create_locks.get(project_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._kb_create_locks[project_id] = lock
+        return lock
+
     async def _ensure_kb(self, project_id: str) -> str:
-        async with self._kb_lock:
-            project = self.store.get_project(project_id)
+        # fast path: read kb_id off-loop, no lock. only the create path is
+        # serialized per-project, so a hot project with a live kb never blocks.
+        project = await asyncio.to_thread(self.store.get_project, project_id)
+        existing_kb_id = project.get("kb_id") if project else None
+        if existing_kb_id:
+            if await self._kb_exists(existing_kb_id):
+                return existing_kb_id
+            logger.warning("stale kb_id=%s for project=%s, clearing and recreating", existing_kb_id, project_id)
+            await asyncio.to_thread(self.store.update_project, project_id, {"kb_id": None})
+        # serialize creation for THIS project only: concurrent callers that saw
+        # no kb_id wait here, then re-read after the first creator persists it.
+        async with self._kb_create_lock(project_id):
+            project = await asyncio.to_thread(self.store.get_project, project_id)
             existing_kb_id = project.get("kb_id") if project else None
             if existing_kb_id:
                 if await self._kb_exists(existing_kb_id):
                     return existing_kb_id
-                logger.warning("stale kb_id=%s for project=%s, clearing and recreating", existing_kb_id, project_id)
-                self.store.update_project(project_id, {"kb_id": None})
             name = project.get("name", project_id) if project else project_id
             try:
                 create_result = await self.upstream.rag_create_kb(name=name, embedding_model=config.RAG_EMBEDDING_MODEL)
@@ -55,7 +75,7 @@ class RAGCoordinator:
             rag_kb_id = create_result.get("id")
             if not rag_kb_id:
                 raise RAGError("rag kb created but no id returned")
-            self.store.update_project(project_id, {"kb_id": rag_kb_id})
+            await asyncio.to_thread(self.store.update_project, project_id, {"kb_id": rag_kb_id})
             logger.info("created rag kb for project=%s kb_id=%s", project_id, rag_kb_id)
             return rag_kb_id
 
@@ -122,10 +142,10 @@ class RAGCoordinator:
         return header + "\n\n" + "\n\n".join(parts), sources
 
     async def index_file(self, file_id: str) -> dict:
-        kfile = self.store.get_knowledge_file(file_id)
+        kfile = await asyncio.to_thread(self.store.get_knowledge_file, file_id)
         if not kfile:
             raise RAGError(f"knowledge file not found: {file_id}")
-        self.store.update_knowledge_file(file_id, {"index_status": "INDEXING"})
+        await asyncio.to_thread(self.store.update_knowledge_file, file_id, {"index_status": "INDEXING"})
         try:
             kb_id = await self._ensure_kb(kfile["project_id"])
             result = await self.upstream.rag_upload_doc(
@@ -134,32 +154,32 @@ class RAGCoordinator:
                 contextualize=True,
             )
         except GatewayError as e:
-            self.store.update_knowledge_file(file_id, {"index_status": "FAILED"})
+            await asyncio.to_thread(self.store.update_knowledge_file, file_id, {"index_status": "FAILED"})
             logger.error("rag index failed file=%s error=%s", file_id, e)
             raise RAGError(f"index failed: {e}") from e
         except Exception as e:
-            self.store.update_knowledge_file(file_id, {"index_status": "FAILED"})
+            await asyncio.to_thread(self.store.update_knowledge_file, file_id, {"index_status": "FAILED"})
             logger.error("rag index unexpected failure file=%s error=%s", file_id, e)
             raise RAGError(f"index failed: {e}") from e
         doc_id = result.get("doc_id") or result.get("document_id")
         if doc_id:
-            self.store.update_knowledge_file(file_id, {
+            await asyncio.to_thread(self.store.update_knowledge_file, file_id, {
                 "index_status": "INDEXED",
                 "rag_doc_id": doc_id,
             })
         else:
-            self.store.update_knowledge_file(file_id, {"index_status": "INDEXED"})
+            await asyncio.to_thread(self.store.update_knowledge_file, file_id, {"index_status": "INDEXED"})
         logger.info("rag index complete file=%s doc=%s", file_id, doc_id)
         return result
 
     async def index_folder(self, folder_id: str, project_id: Optional[str] = None) -> list[dict]:
-        folder = self.store.get_folder(folder_id)
+        folder = await asyncio.to_thread(self.store.get_folder, folder_id)
         if not folder:
             raise RAGError(f"folder not found: {folder_id}")
         if project_id is not None and folder["project_id"] != project_id:
             logger.warning("index_folder ownership mismatch folder=%s folder_project=%s req_project=%s", folder_id, folder["project_id"], project_id)
             raise RAGError(f"folder {folder_id} not in project {project_id}")
-        files = self.store.list_knowledge_files(folder["project_id"], folder_id=folder_id)
+        files = await asyncio.to_thread(self.store.list_knowledge_files, folder["project_id"], folder_id)
         pending = [f["id"] for f in files if f["index_status"] in ("PENDING", "FAILED")]
 
         async def _index_one(fid: str) -> dict:
@@ -207,7 +227,7 @@ class RAGCoordinator:
         scope_folder_ids = None
         if rag_mode == "MANUAL" and folder_ids:
             scope_folder_ids = json.dumps(folder_ids)
-        self.store.create_rag_query({
+        await asyncio.to_thread(self.store.create_rag_query, {
             "project_id": project_id,
             "chat_id": chat_id,
             "query": query_text,
@@ -220,6 +240,12 @@ class RAGCoordinator:
         storage_root = str(config.BASE_DIR)
         prefixes: list[str | None] = []
         if folder_ids:
+            if len(folder_ids) > config.RAG_MAX_FOLDER_SCOPE:
+                logger.warning(
+                    "folder scope too large %d > %d, truncating project=%s",
+                    len(folder_ids), config.RAG_MAX_FOLDER_SCOPE, project_id,
+                )
+                folder_ids = folder_ids[: config.RAG_MAX_FOLDER_SCOPE]
             for fid in folder_ids:
                 folder_row = await asyncio.to_thread(self.store.get_folder, fid)
                 if not folder_row:
@@ -246,7 +272,7 @@ class RAGCoordinator:
         total_raw = sum(len(g) for g in raw_groups)
         items, dropped_below = self._merge_results(raw_groups, top_k=rag_top_k, threshold=rag_threshold)
         metrics.record_rag_query(recalled=len(items), below_threshold=dropped_below)
-        sources = self._to_sources(items, project_id)
+        sources = await self._to_sources(items, project_id)
         logger.info(
             "rag query project=%s mode=%s folders=%d raw=%d recalled=%d below=%d",
             project_id, rag_mode, len(prefixes), total_raw, len(items), dropped_below,
@@ -285,8 +311,8 @@ class RAGCoordinator:
         dropped_below = len(merged) - len(kept)
         return kept[:top_k], dropped_below
 
-    def _to_sources(self, items: list, project_id: str) -> list[dict]:
-        files = {f["id"]: f for f in self.store.list_knowledge_files(project_id)}
+    async def _to_sources(self, items: list, project_id: str) -> list[dict]:
+        files = {f["id"]: f for f in await asyncio.to_thread(self.store.list_knowledge_files, project_id)}
         # O(1) lookup by rag_doc_id instead of inner scan per item.
         by_doc_id: dict[str, str] = {}
         by_doc_name: dict[str, str] = {}
@@ -316,26 +342,30 @@ class RAGCoordinator:
         return sources
 
     async def remove_file_index(self, file_id: str) -> dict:
-        kfile = self.store.get_knowledge_file(file_id)
+        kfile = await asyncio.to_thread(self.store.get_knowledge_file, file_id)
         if not kfile:
             raise RAGError(f"knowledge file not found: {file_id}")
         doc_id = kfile.get("rag_doc_id")
         if not doc_id:
-            self.store.update_knowledge_file(file_id, {"index_status": "PENDING", "rag_doc_id": None})
+            await asyncio.to_thread(self.store.update_knowledge_file, file_id, {"index_status": "PENDING", "rag_doc_id": None})
             return {"status": "no_index"}
         kb_id = await self._ensure_kb(kfile["project_id"])
         try:
             result = await self.upstream.rag_delete_doc(kb_id=kb_id, doc_id=doc_id)
         except GatewayError as e:
+            # do NOT clear rag_doc_id on failure: the upstream doc still exists,
+            # clearing would orphan it and make the next remove silently no-op.
+            # raise so callers (delete_file/replace_file) see the failure.
+            await asyncio.to_thread(self.store.update_knowledge_file, file_id, {"index_status": "FAILED"})
             logger.error("rag doc remove failed file=%s doc=%s error=%s", file_id, doc_id, e)
-            return {"error": "gateway_error", "detail": str(e)}
-        self.store.update_knowledge_file(file_id, {"index_status": "PENDING", "rag_doc_id": None})
+            raise RAGError(f"remove failed: {e}") from e
+        await asyncio.to_thread(self.store.update_knowledge_file, file_id, {"index_status": "PENDING", "rag_doc_id": None})
         logger.info("rag doc removed file=%s doc=%s", file_id, doc_id)
         return result
 
     async def get_rag_status(self, project_id: str) -> dict:
         await self._ensure_project(project_id)
-        files = self.store.list_knowledge_files(project_id)
+        files = await asyncio.to_thread(self.store.list_knowledge_files, project_id)
         status_counts: dict[str, int] = {}
         for f in files:
             s = f["index_status"]

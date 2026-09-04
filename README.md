@@ -588,6 +588,60 @@ this service:
 
 ## Changelog
 
+### v0.7.0 — Enterprise release-blocker fix pass (audit-0904)
+Closes the 2 Blockers + 17 Major findings from the production-release audit
+(`audit/fusion-projects-audit-result-product-0904.md`). Every issue that
+blocked enterprise commercial production release is resolved:
+- **B1 — Event-loop blocking from sync sqlite**: every synchronous
+  `sqlite3` store call in the async engine layer is now wrapped in
+  `asyncio.to_thread(...)`. The single shared connection + `RLock`
+  (`check_same_thread=False`) is safe across the thread pool, so the event
+  loop never blocks on a disk I/O. ~60 call sites converted across
+  `chat_manager`, `project_manager`, `rag_coordinator`, `knowledge_manager`.
+- **B2 — `replace_file` data loss**: knowledge file replacement is now
+  atomic — the new file is written + indexed before the old doc is removed,
+  and a failed remove no longer silently orphans the upstream doc.
+- **M1 — Unbounded list DoS**: every unbounded list accessor
+  (`list_chats`, `list_chat_snapshots`, `list_folders`, `list_knowledge_files`,
+  `list_snapshots`, `list_temp_attachments`, `list_artifact_refs`,
+  `dump_chat_messages`) now accepts `limit`/`offset` and caps at
+  `MAX_PAGE_SIZE=500` when unbounded. No more `LIMIT -1` memory blowout.
+- **M2/M3/M17 — Tenant chokepoint + schema guard**: store-layer
+  `assert_project_owned` guards every child accessor; a newer-than-code
+  schema version refuses to boot (no silent downgrade); `assert_project_owned`
+  is self-defending.
+- **M4 — `upload_file` orphan**: failed index now cleans the orphaned
+  knowledge-file row.
+- **M5/M6/M7/M8 — RAG fixes**: RAG errors raise consistently (no silent
+  error-dict); per-project kb-create locks replace the single global lock
+  (concurrent projects no longer serialize behind one HTTP call, while
+  same-project creation is still race-free); `_to_sources` is O(1) lookup
+  instead of full-scan; folder fan-out is capped (`RAG_MAX_FOLDER_SCOPE`).
+- **M9 — Online backup**: `./start.sh backup [dest_dir]` takes a
+  consistent sqlite3 `.backup` snapshot (safe under concurrent writers) plus
+  a `storage.tar.gz`, timestamped under `~/.fusion-projects/backups/`.
+- **M10/M11 — UDS observability**: UDS dispatch now records per-method
+  request/outcome counters (`record_uds_request`); each request gets a
+  correlation `request_id` injected via a `ContextVar` into both JSON and
+  plain-text log lines.
+- **M12 — Upstream metrics**: `GatewayClient._request` and `artifacts_call`
+  record per-upstream request/error/retry/latency counters, surfaced on
+  `/metrics`. A degraded upstream is now visible instead of failing silently.
+- **M13 — Graceful drain on stop**: `./start.sh stop` sends SIGTERM and
+  polls up to 30s for in-flight requests to drain before SIGKILL — no more
+  mid-request force-kill.
+- **M14 — Identity negative cache**: a denied/failed `verify_jwt` is cached
+  for the TTL so a flood of bad-token requests doesn't each block the event
+  loop on a sync HTTP roundtrip.
+- **M15 — Single-connection `RLock`**: the shared sqlite connection uses a
+  reentrant lock, safe for nested store calls under `to_thread`.
+- **M16 — `identity_verify_sync` blocking**: positive+negative caches cut
+  the sync-verify blocking frequency to near-zero for repeated tokens; a
+  full async verify path waits on `fusion-core#24`.
+- **M17 — Store self-defense**: `assert_project_owned` is the single tenant
+  chokepoint, self-defending against recursion.
+- 181 tests green.
+
 ### v0.6.0 — Adversarial audit fix pass (P0–P3)
 Closes every finding from the adversarial code audit
 (`audit/fusion-projects-0903.md`): 12 P0 fatal, 28 P1 logic, 16 P2, 24 P3,

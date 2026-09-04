@@ -331,6 +331,24 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.7.0 — 企业级发布阻塞问题修复（audit-0904）
+关闭生产发布审计（`audit/fusion-projects-audit-result-product-0904.md`）中的 2 个致命 + 17 个 Major 问题。所有阻塞企业级商业生产发布的问题已解决：
+- **B1 — 同步 sqlite 阻塞事件循环**：engine 层所有同步 `sqlite3` store 调用均通过 `asyncio.to_thread(...` 包裹。单连接 + `RLock`（`check_same_thread=False`）跨线程安全，事件循环不再因磁盘 I/O 阻塞。约 60 处调用已转换。
+- **B2 — `replace_file` 数据丢失**：知识文件替换改为原子操作，先写入+索引新文件再删除旧 doc；删除失败不再静默孤立上游 doc。
+- **M1 — 无界列表 DoS**：所有无界列表（`list_chats`、`list_knowledge_files`、`list_artifact_refs`、`dump_chat_messages` 等）均接受 `limit`/`offset`，无界时上限 `MAX_PAGE_SIZE=500`。
+- **M2/M3/M17 — 租户 chokepoint + schema 守卫**：store 层 `assert_project_owned` 守护所有子表访问；高于代码版本的 schema 拒绝启动；chokepoint 自防御。
+- **M4 — `upload_file` 孤儿**：索引失败时清理孤儿知识文件行。
+- **M5/M6/M7/M8 — RAG 修复**：RAG 错误一致抛出（无静默 error-dict）；每项目 kb 创建锁替换全局锁（并发项目不再串行化，同项目创建仍无竞态）；`_to_sources` 改 O(1) 查找；folder 扇出封顶。
+- **M9 — 在线备份**：`./start.sh backup [dest_dir]` 通过 sqlite3 `.backup` 取一致快照（并发写入安全）+ `storage.tar.gz`，按时间戳存于 `~/.fusion-projects/backups/`。
+- **M10/M11 — UDS 可观测性**：UDS dispatch 记录每方法请求/结果计数；每个请求注入 `request_id` 关联 ID（ContextVar）至 JSON 与纯文本日志。
+- **M12 — 上游指标**：`GatewayClient._request` 与 `artifacts_call` 记录每上游 request/error/retry/latency 计数，`/metrics` 暴露。上游降级可见而非静默失败。
+- **M13 — 优雅停止**：`./start.sh stop` 发送 SIGTERM 并轮询最多 30s 等待在途请求排空后再 SIGKILL。
+- **M14 — 身份负缓存**：被拒/失败的 `verify_jwt` 缓存 TTL，坏 token 洪水请求不再每次阻塞事件循环。
+- **M15 — 单连接 `RLock`**：共享 sqlite 连接用可重入锁，`to_thread` 下嵌套 store 调用安全。
+- **M16 — `identity_verify_sync` 阻塞**：正/负缓存将同步验证阻塞频率降至近零；完整异步验证等待 `fusion-core#24`。
+- **M17 — Store 自防御**：`assert_project_owned` 为单一租户 chokepoint，自防递归。
+- 181 项测试通过。
+
 ### v0.6.0 — 对抗性审计修复（P0–P3 全量）
 关闭对抗性代码审计（`audit/fusion-projects-0903.md`）的全部发现：
 12 个 P0 致命、28 个 P1 逻辑、16 个 P2、24 个 P3，外加 6 个架构硬伤。

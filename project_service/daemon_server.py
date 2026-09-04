@@ -4,11 +4,16 @@ import logging
 import os
 import signal
 import uuid
+from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Optional
 
 from pydantic import ValidationError
 
-from project_service import config
+from project_service import config, metrics
+
+# M11: per-request correlation id. handlers/log lines can attribute themselves
+# to the inbound request without threading it through every signature.
+request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 from project_service.engine.agent_binder import AgentBinder, AgentBinderError
 from project_service.engine.chat_manager import ChatError, ChatManager, ChatNotFound
 from project_service.engine.gateway_client import GatewayClient, GatewayError
@@ -528,6 +533,7 @@ class ProjectRPCServer:
 
     async def _audit_list(self, params: Any) -> list[dict]:
         params = params or {}
+        await self.project_manager.get(params["project_id"])
         rows = self.project_manager.store.list_audit_log(
             params["project_id"],
             limit=params.get("limit", 100),
@@ -536,6 +542,7 @@ class ProjectRPCServer:
         return [AuditLogEntry.from_row(r).model_dump() for r in rows]
 
     async def _audit_log(self, params: Any) -> dict:
+        await self.project_manager.get(params["project_id"])
         row = self.project_manager.store.create_audit_log({
             "project_id": params["project_id"],
             "chat_id": params.get("chat_id"),
@@ -824,12 +831,20 @@ class ProjectRPCServer:
         try:
             req = json.loads(raw.decode("utf-8"))
         except Exception as e:
+            metrics.record_uds_request("(parse)", -32700)
             return _error(None, -32700, "parse error: " + str(e))
         req_id = req.get("id")
         method = req.get("method")
         params = req.get("params") or {}
+        # M11: bind a per-request correlation id so handler log lines attribute
+        # to the inbound request. reset on every handle_request (each request
+        # runs in its own task, so no cross-request bleed).
+        rid = uuid.uuid4().hex[:12]
+        token = request_id_var.set(rid)
         handler = self._handlers.get(method) if isinstance(method, str) else None
         if handler is None:
+            metrics.record_uds_request(str(method), -32601)
+            request_id_var.reset(token)
             return _error(req_id, -32601, "method not found: " + str(method))
         emit: Optional[Callable[[dict], Awaitable[None]]] = None
         if (
@@ -848,46 +863,68 @@ class ProjectRPCServer:
                 result = await self.dispatch(method, params, emit=emit)
             else:
                 result = await handler(params)
+            metrics.record_uds_request(str(method), 200)
             return _result(req_id, result)
         except ProjectNotFound as e:
+            metrics.record_uds_request(str(method), -32001)
             return _error(req_id, -32001, "project not found: " + str(e))
         except ProjectNotArchived as e:
+            metrics.record_uds_request(str(method), -32002)
             return _error(req_id, -32002, "project not archived: " + str(e))
         except ArtifactAlreadyMigrated as e:
+            metrics.record_uds_request(str(method), -32003)
             return _error(req_id, -32003, "artifact already migrated: " + str(e))
         except ArtifactNotFound as e:
+            metrics.record_uds_request(str(method), -32004)
             return _error(req_id, -32004, "artifact not found: " + str(e))
         except ChatNotFound as e:
+            metrics.record_uds_request(str(method), -32005)
             return _error(req_id, -32005, "chat not found: " + str(e))
         except ChatError as e:
+            metrics.record_uds_request(str(method), -32012)
             return _error(req_id, -32012, "chat error: " + str(e))
         except FolderNotFound as e:
+            metrics.record_uds_request(str(method), -32006)
             return _error(req_id, -32006, "folder not found: " + str(e))
         except FolderError as e:
+            metrics.record_uds_request(str(method), -32006)
             return _error(req_id, -32006, "folder error: " + str(e))
         except KnowledgeFileNotFound as e:
+            metrics.record_uds_request(str(method), -32007)
             return _error(req_id, -32007, "knowledge file not found: " + str(e))
         except KnowledgeQuotaExceeded as e:
+            metrics.record_uds_request(str(method), -32014)
             return _error(req_id, -32014, "quota exceeded: " + str(e))
         except KnowledgeError as e:
+            metrics.record_uds_request(str(method), -32013)
             return _error(req_id, -32013, "knowledge error: " + str(e))
         except SnapshotNotFound as e:
+            metrics.record_uds_request(str(method), -32010)
             return _error(req_id, -32010, "snapshot not found: " + str(e))
         except AgentBinderError as e:
+            metrics.record_uds_request(str(method), -32008)
             return _error(req_id, -32008, "agent binder error: " + str(e))
         except RAGError as e:
+            metrics.record_uds_request(str(method), -32009)
             return _error(req_id, -32009, "rag error: " + str(e))
         except GatewayError as e:
+            metrics.record_uds_request(str(method), -32011)
             return _error(req_id, -32011, "gateway error: " + str(e))
         except ProjectError as e:
+            metrics.record_uds_request(str(method), -32000)
             return _error(req_id, -32000, "project error: " + str(e))
         except ValidationError as e:
+            metrics.record_uds_request(str(method), -32602)
             return _error(req_id, -32602, "invalid params: " + str(e.errors()))
         except KeyError as e:
+            metrics.record_uds_request(str(method), -32602)
             return _error(req_id, -32602, "missing param: " + str(e))
         except Exception as e:
-            logger.exception("rpc handler failed method=%s", method)
+            logger.exception("rpc handler failed method=%s rid=%s", method, rid)
+            metrics.record_uds_request(str(method), -32603)
             return _error(req_id, -32603, "internal error: " + str(e))
+        finally:
+            request_id_var.reset(token)
 
     async def _client_cb(
         self,

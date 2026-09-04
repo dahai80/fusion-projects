@@ -77,10 +77,10 @@ class ProjectManager:
         data = payload.model_dump()
         instructions_text = data.pop("instructions", None)
         template_id = data.pop("template_id", None)
-        row = self.store.create_project(data)
+        row = await asyncio.to_thread(self.store.create_project, data)
         self.file_store.init_project(row["id"])
         if instructions_text:
-            self.store.save_instructions(row["id"], instructions_text)
+            await asyncio.to_thread(self.store.save_instructions, row["id"], instructions_text)
             logger.info("project created with instructions id=%s len=%d", row["id"], len(instructions_text))
         else:
             logger.info("project created id=%s name=%s", row["id"], row["name"])
@@ -91,10 +91,11 @@ class ProjectManager:
                 logger.info("project templated from=%s to=%s", template_id, row["id"])
             except Exception as e:
                 logger.warning("template copy failed from=%s to=%s err=%s (project kept)", template_id, row["id"], e)
-        return Project.from_row(self.store.get_project(row["id"]))
+        final = await asyncio.to_thread(self.store.get_project, row["id"])
+        return Project.from_row(final)
 
     async def get(self, project_id: str) -> Project:
-        row = self.store.get_project(project_id)
+        row = await asyncio.to_thread(self.store.get_project, project_id)
         if not row:
             raise ProjectNotFound(project_id)
         return Project.from_row(row)
@@ -106,49 +107,50 @@ class ProjectManager:
         limit: Optional[int] = None,
         offset: int = 0,
     ) -> list[ProjectListItem]:
-        rows = self.store.list_projects(
-            include_archived=include_archived,
-            only_starred=only_starred,
-            limit=limit,
-            offset=offset,
+        rows = await asyncio.to_thread(
+            self.store.list_projects,
+            include_archived,
+            only_starred,
+            limit,
+            offset,
         )
         return [ProjectListItem.from_row(r) for r in rows]
 
     async def update(self, project_id: str, payload: ProjectUpdate) -> Project:
         fields = payload.model_dump(exclude_unset=True)
-        row = self.store.update_project(project_id, fields)
+        row = await asyncio.to_thread(self.store.update_project, project_id, fields)
         if not row:
             raise ProjectNotFound(project_id)
         logger.info("project updated id=%s fields=%s", project_id, list(fields.keys()))
         return Project.from_row(row)
 
     async def archive(self, project_id: str) -> Project:
-        row = self.store.set_archived(project_id, True)
+        row = await asyncio.to_thread(self.store.set_archived, project_id, True)
         if not row:
             raise ProjectNotFound(project_id)
         return Project.from_row(row)
 
     async def unarchive(self, project_id: str) -> Project:
-        row = self.store.set_archived(project_id, False)
+        row = await asyncio.to_thread(self.store.set_archived, project_id, False)
         if not row:
             raise ProjectNotFound(project_id)
         return Project.from_row(row)
 
     async def star(self, project_id: str, starred: bool = True) -> Project:
-        row = self.store.set_starred(project_id, starred)
+        row = await asyncio.to_thread(self.store.set_starred, project_id, starred)
         if not row:
             raise ProjectNotFound(project_id)
         return Project.from_row(row)
 
     async def delete(self, project_id: str) -> None:
-        row = self.store.get_project(project_id)
+        row = await asyncio.to_thread(self.store.get_project, project_id)
         if not row:
             raise ProjectNotFound(project_id)
         if not row["is_archived"]:
             raise ProjectNotArchived(
                 "project must be archived before delete: " + project_id
             )
-        artifact_rows = self.store.list_artifact_refs(project_id)
+        artifact_rows = await asyncio.to_thread(self.store.list_artifact_refs, project_id)
         for ar in artifact_rows:
             try:
                 await self._call_artifacts_engine(
@@ -164,7 +166,7 @@ class ProjectManager:
                 logger.info("rag kb deleted project=%s kb_id=%s", project_id, kb_id)
             except Exception as e:
                 logger.warning("rag kb delete failed project=%s kb_id=%s err=%s (orphan possible)", project_id, kb_id, e)
-        self.store.delete_project(project_id)
+        await asyncio.to_thread(self.store.delete_project, project_id)
         self.file_store.remove_project(project_id)
         logger.info("project deleted id=%s artifacts_cleared=%d", project_id, len(artifact_rows))
 
@@ -183,7 +185,7 @@ class ProjectManager:
         artifact_id: str,
     ) -> ArtifactRef:
         await self.get(project_id)
-        existing = self.store.get_artifact_ref(artifact_id)
+        existing = await asyncio.to_thread(self.store.get_artifact_ref, artifact_id)
         if existing:
             raise ArtifactAlreadyMigrated(
                 f"artifact {artifact_id} already migrated to project {existing['project_id']}"
@@ -205,7 +207,7 @@ class ProjectManager:
             "source_session_id": artifact.get("session_id"),
         }
         try:
-            row = self.store.create_artifact_ref(ref_data)
+            row = await asyncio.to_thread(self.store.create_artifact_ref, ref_data)
         except Exception as e:
             # upstream already moved the artifact to this project's KB; the local
             # ref insert failed, leaving the artifact orphaned (moved but untracked).
@@ -231,11 +233,12 @@ class ProjectManager:
         search: Optional[str] = None,
     ) -> list[ArtifactRef]:
         await self.get(project_id)
-        rows = self.store.list_artifact_refs(
+        rows = await asyncio.to_thread(
+            self.store.list_artifact_refs,
             project_id,
-            artifact_type=artifact_type,
-            artifact_kind=artifact_kind,
-            search=search,
+            artifact_type,
+            artifact_kind,
+            search,
         )
         return [ArtifactRef.from_row(r) for r in rows]
 
@@ -248,11 +251,11 @@ class ProjectManager:
         if artifact_ids:
             refs = []
             for aid in artifact_ids:
-                ref = self.store.get_artifact_ref(aid)
+                ref = await asyncio.to_thread(self.store.get_artifact_ref, aid)
                 if ref and ref["project_id"] == project_id:
                     refs.append(ref)
         else:
-            refs = self.store.list_artifact_refs(project_id)
+            refs = await asyncio.to_thread(self.store.list_artifact_refs, project_id)
         if not refs:
             raise ArtifactNotFound("no artifacts to export")
         buf = io.BytesIO()
@@ -321,10 +324,10 @@ class ProjectManager:
         return data
 
     async def remove_artifact(self, artifact_id: str) -> bool:
-        existing = self.store.get_artifact_ref(artifact_id)
+        existing = await asyncio.to_thread(self.store.get_artifact_ref, artifact_id)
         if not existing:
             raise ArtifactNotFound(artifact_id)
-        removed = self.store.remove_artifact_ref(artifact_id)
+        removed = await asyncio.to_thread(self.store.remove_artifact_ref, artifact_id)
         if removed:
             logger.info("artifact ref removed artifact=%s", artifact_id)
         return removed
@@ -375,7 +378,7 @@ class ProjectManager:
         folders = await asyncio.to_thread(self.store.list_folders, source_id)
         folder_id_map: dict[Optional[str], Optional[str]] = {}
         for f in folders:
-            new_folder = self.store.create_folder({
+            new_folder = await asyncio.to_thread(self.store.create_folder, {
                 "project_id": dest_id,
                 "name": f["name"],
                 "parent_id": folder_id_map.get(f["parent_id"]),
@@ -403,7 +406,7 @@ class ProjectManager:
                 dest_path = dest_dir / f"{dest_path.stem}_{uuid.uuid4().hex[:8]}{dest_path.suffix}"
             if old_path.exists():
                 shutil.copy2(str(old_path), str(dest_path))
-            new_file = self.store.create_knowledge_file({
+            new_file = await asyncio.to_thread(self.store.create_knowledge_file, {
                 "project_id": dest_id,
                 "folder_id": folder_id,
                 "name": dest_path.stem,
@@ -421,14 +424,14 @@ class ProjectManager:
         if copy_chats:
             chats = await asyncio.to_thread(self.store.list_chats, source_id)
             for c in chats:
-                new_chat = self.store.create_chat({
+                new_chat = await asyncio.to_thread(self.store.create_chat, {
                     "project_id": dest_id,
                     "title": c["title"],
                     "agent_id": c.get("agent_id"),
                 })
                 msgs = await asyncio.to_thread(self.store.list_messages, c["id"])
                 for m in msgs:
-                    self.store.create_message({
+                    await asyncio.to_thread(self.store.create_message, {
                         "chat_id": new_chat["id"],
                         "role": m["role"],
                         "content": m["content"],

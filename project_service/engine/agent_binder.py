@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 
@@ -34,14 +35,17 @@ class AgentBinder:
         self.upstream = upstream or GatewayClient()
 
     async def _ensure_project(self, project_id: str) -> None:
-        row = self.store.get_project(project_id)
+        # store accessors are sync sqlite — run them off the event loop so a slow
+        # disk/query never blocks all coroutines. single shared connection + RLock
+        # is safe across threads (check_same_thread=False).
+        row = await asyncio.to_thread(self.store.get_project, project_id)
         if not row:
             raise ProjectNotFound(project_id)
 
     async def get_binding(self, project_id: str, chat_id: Optional[str] = None) -> AgentBinding:
         await self._ensure_project(project_id)
         if chat_id:
-            row = self.store.get_binding_by_chat(chat_id)
+            row = await asyncio.to_thread(self.store.get_binding_by_chat, chat_id)
             if row:
                 return AgentBinding(
                     project_id=row["project_id"],
@@ -49,9 +53,9 @@ class AgentBinder:
                     agent_id=row["agent_id"],
                     merge_mode=PromptMergeMode(row["merge_mode"]),
                 )
-            row = self.store.get_binding_by_project(project_id)
+            row = await asyncio.to_thread(self.store.get_binding_by_project, project_id)
         else:
-            row = self.store.get_binding_by_project(project_id)
+            row = await asyncio.to_thread(self.store.get_binding_by_project, project_id)
         if row:
             return AgentBinding(
                 project_id=row["project_id"],
@@ -59,7 +63,7 @@ class AgentBinder:
                 agent_id=row["agent_id"],
                 merge_mode=PromptMergeMode(row["merge_mode"]),
             )
-        project_row = self.store.get_project(project_id)
+        project_row = await asyncio.to_thread(self.store.get_project, project_id)
         return AgentBinding.from_project_row(project_row)
 
     async def set_binding(
@@ -75,7 +79,10 @@ class AgentBinder:
             if preview is None:
                 logger.warning("agent not found upstream agent_id=%s, rejecting bind", agent_id)
                 raise AgentUnavailable(f"agent {agent_id} not found upstream, cannot bind")
-        existing = self.store.get_binding_by_project(project_id) if not chat_id else self.store.get_binding_by_chat(chat_id)
+        if not chat_id:
+            existing = await asyncio.to_thread(self.store.get_binding_by_project, project_id)
+        else:
+            existing = await asyncio.to_thread(self.store.get_binding_by_chat, chat_id)
         if existing:
             fields: dict = {}
             if agent_id is not None:
@@ -83,7 +90,7 @@ class AgentBinder:
             if merge_mode is not None:
                 fields["merge_mode"] = merge_mode.value
             if fields:
-                self.store.update_binding(existing["id"], fields)
+                await asyncio.to_thread(self.store.update_binding, existing["id"], fields)
                 logger.info("binding updated project=%s chat=%s fields=%s", project_id, chat_id, list(fields.keys()))
         else:
             data = {
@@ -92,17 +99,17 @@ class AgentBinder:
                 "agent_id": agent_id,
                 "merge_mode": (merge_mode or PromptMergeMode.AGENT_FIRST).value,
             }
-            self.store.create_binding(data)
+            await asyncio.to_thread(self.store.create_binding, data)
             logger.info("binding created project=%s chat=%s agent=%s", project_id, chat_id, agent_id)
         return await self.get_binding(project_id, chat_id=chat_id)
 
     async def remove_binding(self, project_id: str, chat_id: Optional[str] = None) -> None:
         if chat_id:
-            row = self.store.get_binding_by_chat(chat_id)
+            row = await asyncio.to_thread(self.store.get_binding_by_chat, chat_id)
         else:
-            row = self.store.get_binding_by_project(project_id)
+            row = await asyncio.to_thread(self.store.get_binding_by_project, project_id)
         if row:
-            self.store.delete_binding(row["id"])
+            await asyncio.to_thread(self.store.delete_binding, row["id"])
             logger.info("binding removed project=%s chat=%s", project_id, chat_id)
 
     async def list_available_agents(self) -> list[AgentMeta]:
@@ -149,7 +156,7 @@ class AgentBinder:
         chat_id: Optional[str] = None,
     ) -> str:
         binding = await self.get_binding(project_id, chat_id=chat_id)
-        instruction_row = self.store.get_instructions(project_id)
+        instruction_row = await asyncio.to_thread(self.store.get_instructions, project_id)
         project_instruction = instruction_row["content"] if instruction_row else ""
         parts: list[str] = []
         if binding.merge_mode == PromptMergeMode.AGENT_FIRST:

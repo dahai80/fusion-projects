@@ -44,7 +44,7 @@ class ChatManager:
         self.file_store = file_store or FileStore()
 
     async def _ensure_project(self, project_id: str) -> None:
-        row = self.store.get_project(project_id)
+        row = await asyncio.to_thread(self.store.get_project, project_id)
         if not row:
             raise ProjectNotFound(project_id)
 
@@ -59,12 +59,12 @@ class ChatManager:
         await self._ensure_project(project_id)
         data = payload.model_dump()
         data["project_id"] = project_id
-        row = self.store.create_chat(data)
+        row = await asyncio.to_thread(self.store.create_chat, data)
         logger.info("chat created id=%s project=%s", row["id"], project_id)
         return Chat.from_row(row)
 
     async def get_chat(self, chat_id: str, project_id: Optional[str] = None) -> Chat:
-        row = self.store.get_chat(chat_id)
+        row = await asyncio.to_thread(self.store.get_chat, chat_id)
         if not row:
             raise ChatNotFound(chat_id)
         chat = Chat.from_row(row)
@@ -79,12 +79,12 @@ class ChatManager:
         only_starred: bool = False,
     ) -> list[ChatListItem]:
         await self._ensure_project(project_id)
-        rows = self.store.list_chats(project_id, only_starred=only_starred)
+        rows = await asyncio.to_thread(self.store.list_chats, project_id, only_starred)
         return [ChatListItem.from_row(r) for r in rows]
 
     async def update_chat(self, chat_id: str, fields: dict, project_id: Optional[str] = None) -> Chat:
         await self._assert_chat_in_project(chat_id, project_id)
-        row = self.store.update_chat(chat_id, fields)
+        row = await asyncio.to_thread(self.store.update_chat, chat_id, fields)
         if not row:
             raise ChatNotFound(chat_id)
         logger.info("chat updated id=%s fields=%s", chat_id, list(fields.keys()))
@@ -95,7 +95,7 @@ class ChatManager:
 
     async def delete_chat(self, chat_id: str, project_id: Optional[str] = None) -> None:
         chat = await self._assert_chat_in_project(chat_id, project_id)
-        if not self.store.delete_chat(chat_id):
+        if not await asyncio.to_thread(self.store.delete_chat, chat_id):
             raise ChatNotFound(chat_id)
         if chat.project_id:
             attach_dir = self.file_store.project_dir(chat.project_id) / "attachments" / chat_id
@@ -111,7 +111,7 @@ class ChatManager:
         await self._assert_chat_in_project(chat_id, project_id)
         await self._ensure_project(target_project_id)
         chat = await self.get_chat(chat_id)
-        row = self.store.update_chat(chat_id, {"project_id": target_project_id})
+        row = await asyncio.to_thread(self.store.update_chat, chat_id, {"project_id": target_project_id})
         if not row:
             raise ChatNotFound(chat_id)
         logger.info("chat moved id=%s from=%s to=%s", chat_id, chat.project_id, target_project_id)
@@ -119,7 +119,7 @@ class ChatManager:
 
     async def detach_chat(self, chat_id: str, project_id: Optional[str] = None) -> Chat:
         chat = await self._assert_chat_in_project(chat_id, project_id)
-        row = self.store.detach_chat(chat_id)
+        row = await asyncio.to_thread(self.store.detach_chat, chat_id)
         if not row:
             raise ChatNotFound(chat_id)
         logger.info("chat detached id=%s from_project=%s", chat_id, chat.project_id)
@@ -140,7 +140,7 @@ class ChatManager:
             "fork_from_chat_id": chat_id,
             "fork_from_snapshot_id": snapshot.id,
         }
-        row = self.store.create_chat(fork_data)
+        row = await asyncio.to_thread(self.store.create_chat, fork_data)
         # paginated copy with a hard cap: avoid loading an entire very-long chat
         # into memory + one giant batch insert. keep the most-recent cap messages.
         cap = config.FORK_MAX_MESSAGES
@@ -171,8 +171,8 @@ class ChatManager:
         project_id: Optional[str] = None,
     ) -> ChatSnapshot:
         chat = await self._assert_chat_in_project(chat_id, project_id)
-        msg_count = self.store.count_messages(chat_id)
-        messages_json = self.store.dump_chat_messages(chat_id)
+        msg_count = await asyncio.to_thread(self.store.count_messages, chat_id)
+        messages_json = await asyncio.to_thread(self.store.dump_chat_messages, chat_id)
         data = {
             "chat_id": chat_id,
             "title": label or chat.title,
@@ -181,17 +181,17 @@ class ChatManager:
             "message_count": msg_count,
             "agent_id": chat.agent_id,
         }
-        row = self.store.create_chat_snapshot(data)
+        row = await asyncio.to_thread(self.store.create_chat_snapshot, data)
         logger.info("chat snapshot created id=%s chat=%s msgs=%d", row["id"], chat_id, msg_count)
         return ChatSnapshot.from_row(row)
 
     async def list_snapshots(self, chat_id: str, project_id: Optional[str] = None) -> list[ChatSnapshot]:
         await self._assert_chat_in_project(chat_id, project_id)
-        rows = self.store.list_chat_snapshots(chat_id)
+        rows = await asyncio.to_thread(self.store.list_chat_snapshots, chat_id)
         return [ChatSnapshot.from_row(r) for r in rows]
 
     async def restore_snapshot(self, snapshot_id: str, project_id: Optional[str] = None) -> Chat:
-        snap_row = self.store.get_chat_snapshot(snapshot_id)
+        snap_row = await asyncio.to_thread(self.store.get_chat_snapshot, snapshot_id)
         if not snap_row:
             raise ChatNotFound(f"snapshot {snapshot_id}")
         chat_id = snap_row["chat_id"]
@@ -202,16 +202,16 @@ class ChatManager:
         except (ValueError, TypeError) as e:
             logger.error("snapshot %s messages decode failed: %s", snapshot_id, e)
             raise ChatError(f"snapshot {snapshot_id} has corrupt messages payload")
-        self.store.replace_chat_messages(chat_id, restored_rows)
+        await asyncio.to_thread(self.store.replace_chat_messages, chat_id, restored_rows)
         logger.info("restored snapshot %s for chat %s msgs=%d", snapshot_id, chat_id, len(restored_rows))
         return await self.get_chat(chat_id)
 
     async def delete_snapshot(self, snapshot_id: str, project_id: Optional[str] = None) -> None:
-        snap_row = self.store.get_chat_snapshot(snapshot_id)
+        snap_row = await asyncio.to_thread(self.store.get_chat_snapshot, snapshot_id)
         if not snap_row:
             raise ChatNotFound(f"snapshot {snapshot_id}")
         await self._assert_chat_in_project(snap_row["chat_id"], project_id)
-        if not self.store.delete_chat_snapshot(snapshot_id):
+        if not await asyncio.to_thread(self.store.delete_chat_snapshot, snapshot_id):
             raise ChatNotFound(f"snapshot {snapshot_id}")
         logger.info("chat snapshot deleted id=%s", snapshot_id)
 
@@ -219,8 +219,8 @@ class ChatManager:
         await self._assert_chat_in_project(chat_id, project_id)
         data = payload.model_dump()
         data["chat_id"] = chat_id
-        row = self.store.create_message(data)
-        self.store.update_chat(chat_id, {"updated_at": None})
+        row = await asyncio.to_thread(self.store.create_message, data)
+        await asyncio.to_thread(self.store.update_chat, chat_id, {"updated_at": None})
         logger.info("message added id=%s chat=%s role=%s", row["id"], chat_id, data["role"])
         return Message.from_row(row)
 
@@ -232,15 +232,15 @@ class ChatManager:
         project_id: Optional[str] = None,
     ) -> list[Message]:
         await self._assert_chat_in_project(chat_id, project_id)
-        rows = self.store.list_messages(chat_id, limit=limit, offset=offset)
+        rows = await asyncio.to_thread(self.store.list_messages, chat_id, limit, offset)
         return [Message.from_row(r) for r in rows]
 
     async def delete_message(self, message_id: str, project_id: Optional[str] = None) -> None:
-        msg = self.store.get_message(message_id)
+        msg = await asyncio.to_thread(self.store.get_message, message_id)
         if not msg:
             raise ChatNotFound(f"message {message_id}")
         await self._assert_chat_in_project(msg["chat_id"], project_id)
-        if not self.store.delete_message(message_id):
+        if not await asyncio.to_thread(self.store.delete_message, message_id):
             raise ChatNotFound(f"message {message_id}")
         logger.info("message deleted id=%s", message_id)
 
@@ -273,17 +273,17 @@ class ChatManager:
             "file_size": src.stat().st_size,
             "mime_type": mime_type,
         }
-        row = self.store.create_temp_attachment(data)
+        row = await asyncio.to_thread(self.store.create_temp_attachment, data)
         logger.info("temp attachment added id=%s chat=%s name=%s", row["id"], chat_id, safe_name)
         return TempAttachment.from_row(row)
 
     async def list_temp_attachments(self, chat_id: str, project_id: Optional[str] = None) -> list[TempAttachment]:
         await self._assert_chat_in_project(chat_id, project_id)
-        rows = self.store.list_temp_attachments(chat_id)
+        rows = await asyncio.to_thread(self.store.list_temp_attachments, chat_id)
         return [TempAttachment.from_row(r) for r in rows]
 
     async def delete_temp_attachment(self, attachment_id: str, project_id: Optional[str] = None) -> bool:
-        existing = self.store.get_temp_attachment(attachment_id)
+        existing = await asyncio.to_thread(self.store.get_temp_attachment, attachment_id)
         if not existing:
             raise ChatNotFound(f"temp attachment {attachment_id}")
         await self._assert_chat_in_project(existing["chat_id"], project_id)
@@ -293,6 +293,6 @@ class ChatManager:
                 old_path.unlink()
         except OSError as e:
             logger.warning("temp attachment unlink failed id=%s path=%s err=%s", attachment_id, old_path, e)
-        deleted = self.store.delete_temp_attachment(attachment_id)
+        deleted = await asyncio.to_thread(self.store.delete_temp_attachment, attachment_id)
         logger.info("temp attachment deleted id=%s deleted=%s", attachment_id, deleted)
         return deleted

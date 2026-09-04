@@ -7,9 +7,23 @@ from typing import Any, Optional
 
 import httpx
 
-from project_service import config
+from project_service import config, metrics
 
 logger = logging.getLogger(__name__)
+
+
+def _upstream_name(base_url: str) -> str:
+    # collapse to a short stable label per upstream for metrics keys.
+    for label, url in (
+        ("gateway", config.GATEWAY_URL),
+        ("rag", config.RAG_BASE_URL),
+        ("agent", config.AGENT_STUDIO_URL),
+        ("artifacts", config.ARTIFACTS_URL),
+        ("identity", config.IDENTITY_URL),
+    ):
+        if base_url == url:
+            return label
+    return base_url.split("//")[-1].split("/")[0]
 
 
 class GatewayError(Exception):
@@ -57,6 +71,10 @@ class GatewayClient:
         # blocking verify call for repeated requests (VerifyJwt is sync by
         # fusion-core contract, so each uncached verify blocks the loop thread).
         self._verify_cache: dict[str, tuple[dict, float]] = {}
+        # M14: negative cache — a denied/failed verify is remembered for the TTL
+        # so a flood of requests with the same bad token doesn't each block the
+        # event-loop thread on a sync HTTP roundtrip. value is expiry_ts only.
+        self._verify_neg_cache: dict[str, float] = {}
         self._verify_cache_ttl = config.IDENTITY_VERIFY_CACHE_TTL
         self._verify_client = httpx.Client(timeout=config.IDENTITY_VERIFY_TIMEOUT)
         logger.info("GatewayClient ready gateway=%s rag=%s agent=%s artifacts=%s auth=%s",
@@ -108,43 +126,49 @@ class GatewayClient:
     ) -> dict:
         url = f"{base_url}{path}"
         client = self._client_for(base_url)
+        up = _upstream_name(base_url)
         last_exc: Optional[Exception] = None
         last_status: Optional[int] = None
-        for attempt in range(retries + 1):
-            try:
-                resp = await client.request(
-                    method, url, json=json_data, params=params,
-                    headers=self._auth_headers(),
-                )
-                resp.raise_for_status()
-                return resp.json()
-            except httpx.HTTPStatusError as e:
-                last_status = e.response.status_code
-                last_exc = e
-                if e.response.status_code not in _RETRYABLE_STATUS:
-                    logger.error("gateway %s %s -> %d (non-retryable): %s", method, url, e.response.status_code, e)
-                    raise GatewayError(f"{method} {url} -> {e.response.status_code}: {e}") from e
-                # non-idempotent methods already reached the server — a retry
-                # risks a duplicate side effect (e.g. double KB creation), so
-                # fail rather than retry on HTTP status errors.
-                if method.upper() not in _IDEMPOTENT_METHODS:
-                    logger.error("gateway %s %s -> %d (non-idempotent, not retrying): %s", method, url, e.response.status_code, e)
-                    raise GatewayError(f"{method} {url} -> {e.response.status_code}: {e}") from e
-                logger.warning("gateway %s %s -> %d (retry %d/%d)", method, url, e.response.status_code, attempt + 1, retries)
-            except (httpx.TimeoutException, httpx.TransportError) as e:
-                # transport errors: request may not have reached the server,
-                # safe to retry even for non-idempotent methods.
-                last_exc = e
-                logger.warning("gateway %s %s transient error (retry %d/%d): %s", method, url, attempt + 1, retries, e)
-            except httpx.RequestError as e:
-                last_exc = e
-                logger.error("gateway %s %s request error (non-retryable): %s", method, url, e)
-                raise GatewayError(f"{method} {url} request error: {e}") from e
-            if attempt < retries:
-                await asyncio.sleep(_retry_backoff(attempt))
-        logger.error("gateway %s %s exhausted %d retries last_status=%s last_err=%s", method, url, retries, last_status, last_exc)
-        detail = f"status={last_status}" if last_status is not None else f"err={last_exc}"
-        raise GatewayError(f"{method} {url} failed after {retries} retries: {detail}")
+        retries_done = 0
+        t0 = time.monotonic()
+        try:
+            for attempt in range(retries + 1):
+                try:
+                    resp = await client.request(
+                        method, url, json=json_data, params=params,
+                        headers=self._auth_headers(),
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    metrics.record_gateway(up, ok=True, retries=retries_done, latency=time.monotonic() - t0)
+                    return data
+                except httpx.HTTPStatusError as e:
+                    last_status = e.response.status_code
+                    last_exc = e
+                    if e.response.status_code not in _RETRYABLE_STATUS:
+                        logger.error("gateway %s %s -> %d (non-retryable): %s", method, url, e.response.status_code, e)
+                        raise GatewayError(f"{method} {url} -> {e.response.status_code}: {e}") from e
+                    if method.upper() not in _IDEMPOTENT_METHODS:
+                        logger.error("gateway %s %s -> %d (non-idempotent, not retrying): %s", method, url, e.response.status_code, e)
+                        raise GatewayError(f"{method} {url} -> {e.response.status_code}: {e}") from e
+                    retries_done += 1
+                    logger.warning("gateway %s %s -> %d (retry %d/%d)", method, url, e.response.status_code, attempt + 1, retries)
+                except (httpx.TimeoutException, httpx.TransportError) as e:
+                    last_exc = e
+                    retries_done += 1
+                    logger.warning("gateway %s %s transient error (retry %d/%d): %s", method, url, attempt + 1, retries, e)
+                except httpx.RequestError as e:
+                    last_exc = e
+                    logger.error("gateway %s %s request error (non-retryable): %s", method, url, e)
+                    raise GatewayError(f"{method} {url} request error: {e}") from e
+                if attempt < retries:
+                    await asyncio.sleep(_retry_backoff(attempt))
+            logger.error("gateway %s %s exhausted %d retries last_status=%s last_err=%s", method, url, retries, last_status, last_exc)
+            detail = f"status={last_status}" if last_status is not None else f"err={last_exc}"
+            raise GatewayError(f"{method} {url} failed after {retries} retries: {detail}")
+        except GatewayError:
+            metrics.record_gateway(up, ok=False, retries=retries_done, latency=time.monotonic() - t0)
+            raise
 
     async def _health_check(self, url: str) -> bool:
         client = self._client_for(url.rsplit("/", 1)[0]) if "/" in url else self._http_gateway
@@ -263,34 +287,41 @@ class GatewayClient:
         payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
         last_exc: Optional[Exception] = None
         last_status: Optional[int] = None
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                resp = await self._http_artifacts.post(self._artifacts_url, json=payload, headers=self._auth_headers(), timeout=10.0)
-                resp.raise_for_status()
-                data = resp.json()
-                if "error" in data:
-                    raise GatewayError(f"artifacts {method} rpc_error: {data['error']}")
-                return data.get("result", {})
-            except httpx.HTTPStatusError as e:
-                last_status = e.response.status_code
-                last_exc = e
-                if e.response.status_code not in _RETRYABLE_STATUS:
-                    logger.error("artifacts %s -> %d (non-retryable): %s", method, e.response.status_code, e)
+        retries_done = 0
+        t0 = time.monotonic()
+        try:
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    resp = await self._http_artifacts.post(self._artifacts_url, json=payload, headers=self._auth_headers(), timeout=10.0)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if "error" in data:
+                        raise GatewayError(f"artifacts {method} rpc_error: {data['error']}")
+                    metrics.record_gateway("artifacts", ok=True, retries=retries_done, latency=time.monotonic() - t0)
+                    return data.get("result", {})
+                except httpx.HTTPStatusError as e:
+                    last_status = e.response.status_code
+                    last_exc = e
+                    if e.response.status_code not in _RETRYABLE_STATUS:
+                        logger.error("artifacts %s -> %d (non-retryable): %s", method, e.response.status_code, e)
+                        raise GatewayError(f"artifacts {method} -> {e.response.status_code}: {e}") from e
+                    logger.error("artifacts %s -> %d (non-idempotent, not retrying): %s", method, e.response.status_code, e)
                     raise GatewayError(f"artifacts {method} -> {e.response.status_code}: {e}") from e
-                # POST JSON-RPC: not idempotent, do not retry on HTTP status.
-                logger.error("artifacts %s -> %d (non-idempotent, not retrying): %s", method, e.response.status_code, e)
-                raise GatewayError(f"artifacts {method} -> {e.response.status_code}: {e}") from e
-            except (httpx.TimeoutException, httpx.TransportError) as e:
-                last_exc = e
-                logger.warning("artifacts %s transient error (retry %d/%d): %s", method, attempt + 1, _MAX_RETRIES, e)
-            except httpx.RequestError as e:
-                last_exc = e
-                logger.error("artifacts %s request error (non-retryable): %s", method, e)
-                raise GatewayError(f"artifacts {method} request error: {e}") from e
-            if attempt < _MAX_RETRIES:
-                await asyncio.sleep(_retry_backoff(attempt))
-        detail = f"status={last_status}" if last_status is not None else f"err={last_exc}"
-        raise GatewayError(f"artifacts {method} failed after {_MAX_RETRIES} retries: {detail}")
+                except (httpx.TimeoutException, httpx.TransportError) as e:
+                    last_exc = e
+                    retries_done += 1
+                    logger.warning("artifacts %s transient error (retry %d/%d): %s", method, attempt + 1, _MAX_RETRIES, e)
+                except httpx.RequestError as e:
+                    last_exc = e
+                    logger.error("artifacts %s request error (non-retryable): %s", method, e)
+                    raise GatewayError(f"artifacts {method} request error: {e}") from e
+                if attempt < _MAX_RETRIES:
+                    await asyncio.sleep(_retry_backoff(attempt))
+            detail = f"status={last_status}" if last_status is not None else f"err={last_exc}"
+            raise GatewayError(f"artifacts {method} failed after {_MAX_RETRIES} retries: {detail}")
+        except GatewayError:
+            metrics.record_gateway("artifacts", ok=False, retries=retries_done, latency=time.monotonic() - t0)
+            raise
 
     # ── fusion-identity (tenant registry + JWT issuer) ──
     # verify is called from the sync verify_jwt callback inside TenantMiddleware,
@@ -301,14 +332,23 @@ class GatewayClient:
             raise GatewayError("identity service token not configured")
         # short-TTL positive cache: a verified token is reused for a few seconds
         # so repeated requests don't each block the event-loop thread on a sync
-        # HTTP call. negative results are NOT cached (a bad token shouldn't be
-        # retryable for free). VerifyJwt is sync by fusion-core contract.
+        # HTTP call. VerifyJwt is sync by fusion-core contract, so the verify
+        # call itself still blocks the loop thread when uncached — a full async
+        # fix waits on fusion-core#24 (async verify_jwt). the caches below cut
+        # the blocking frequency to near-zero for repeated tokens (M16 mitigation).
+        # M14: negative cache — a denied/failed verify is remembered for the TTL
+        # so a flood of bad-token requests doesn't each block on a sync roundtrip.
         ttl = self._verify_cache_ttl
         now = time.monotonic()
         if ttl > 0:
             cached = self._verify_cache.get(token)
             if cached and cached[1] > now:
+                metrics.record_identity_verify(ok=True, cached=True)
                 return cached[0]
+            neg = self._verify_neg_cache.get(token)
+            if neg and neg > now:
+                metrics.record_identity_verify(ok=False, cached=True)
+                raise GatewayError("identity verify cached denial")
         url = f"{self._identity_url}/api/v1/auth/verify"
         headers = {"Authorization": f"Bearer {self._identity_service_token}"}
         try:
@@ -317,15 +357,26 @@ class GatewayClient:
             claims = resp.json()
         except httpx.HTTPStatusError as e:
             logger.warning("identity verify %d: %s", e.response.status_code, e)
+            if ttl > 0:
+                self._verify_neg_cache[token] = now + ttl
+                if len(self._verify_neg_cache) > 1024:
+                    self._verify_neg_cache = {k: v for k, v in self._verify_neg_cache.items() if v > now}
+            metrics.record_identity_verify(ok=False)
             raise GatewayError(f"identity verify -> {e.response.status_code}") from e
         except (httpx.TimeoutException, httpx.RequestError) as e:
             logger.warning("identity verify error: %s", e)
+            if ttl > 0:
+                self._verify_neg_cache[token] = now + ttl
+                if len(self._verify_neg_cache) > 1024:
+                    self._verify_neg_cache = {k: v for k, v in self._verify_neg_cache.items() if v > now}
+            metrics.record_identity_verify(ok=False)
             raise GatewayError(f"identity verify error: {e}") from e
         if ttl > 0:
             self._verify_cache[token] = (claims, now + ttl)
-            # bound cache growth: drop a few expired entries opportunistically.
+            self._verify_neg_cache.pop(token, None)
             if len(self._verify_cache) > 1024:
                 self._verify_cache = {k: v for k, v in self._verify_cache.items() if v[1] > now}
+        metrics.record_identity_verify(ok=True)
         return claims
 
     async def identity_emit_usage(self, tenant_id: str, metric: str, value: int, *, source: str = "fusion-projects", model: Optional[str] = None, user_id: Optional[str] = None) -> None:
