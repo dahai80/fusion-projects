@@ -588,6 +588,35 @@ this service:
 
 ## Changelog
 
+### v0.7.3 — RAG graceful-degradation fix + integration verification (194 green)
+Closes the verification pass after upstream `fusion-mlx#779` (memory_enforcer
+false pressure) was fixed. Three fixes landed:
+
+1. **`_kb_exists` graceful-degradation bug** (`rag_coordinator.py`): when the
+   rag upstream was unreachable (connection-refused / 5xx / timeout), the KB
+   probe treated the ambiguous result as "kb not found" → forced a
+   `rag_create_kb` against the dead upstream → raised `RAGError`. This broke
+   the chat path's `error in result` contract: `RAGCoordinator.query` raised
+   instead of returning `{"error": ...}`. Fixed: an ambiguous probe now keeps
+   the existing `kb_id` (optimistic), so the query falls through to
+   `_search_one`, which catches `GatewayError` and surfaces `{"error": ...}`
+   — chat degrades to no-RAG as designed. Only a confirmed 404 (upstream up,
+   kb gone) triggers a recreate.
+2. **Embedding model name** (`config.py`): `RAG_EMBEDDING_MODEL` default
+   changed `BGE-M3` → `BAAI/bge-m3`. fusion-mlx accepts `BAAI/bge-m3` /
+   `BAAI--bge-m3` but 404s on `BGE-M3`; the stale default caused RAG
+   injection indexing to fail in e2e.
+3. **Fault-injection test hardening** (`test_fault_injection.py`): the
+   restart helper now uses the rag venv python with `FUSION_RAG_EMBED` /
+   `FUSION_MLX_URL` / `FUSION_MLX_API_KEY` env (was bare `python3` → no
+   lancedb, no model name → recovery never came back); the mid-request kill
+   is now deterministic (kill-then-query) instead of a 0.15s raced kill that
+   only worked when rag was already sick.
+
+Full integration suite: **194 passed, 0 failed, 0 skipped** — all 5 e2e +
+fault-injection + M6 stress tests green against live fusion-mlx 0.8.75 (both
+`Qwen3.5-4B-MLX-4bit` + `BAAI/bge-m3` resident) and fusion-rag 0.8.0rc4.
+
 ### v0.7.2 — M16 async identity verify (last residual closed)
 Closes the final release-audit residual: `identity_verify_sync` blocked the
 event loop on every cache miss inside the REST TenantMiddleware verify

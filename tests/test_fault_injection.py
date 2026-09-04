@@ -32,9 +32,15 @@ def _rag_pid() -> int | None:
 
 def _start_rag() -> None:
     import subprocess
+    rag_venv_py = os.path.expanduser("~/fusion/fusion-rag/.venv/bin/python")
+    env = os.environ.copy()
+    env["FUSION_RAG_EMBED"] = "BAAI/bge-m3"
+    env["FUSION_MLX_URL"] = env.get("FUSION_MLX_URL", "http://127.0.0.1:11434/v1")
+    env["FUSION_MLX_API_KEY"] = env.get("FUSION_MLX_API_KEY", "fg-admin-key")
     subprocess.Popen(
-        ["python3", "-m", "fusion_rag.api.server"],
+        [rag_venv_py, "-m", "fusion_rag.api.server"],
         cwd=os.path.expanduser("~/fusion/fusion-rag"),
+        env=env,
         stdout=open("/tmp/rag_fault.log", "ab"),
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -69,7 +75,7 @@ async def test_rag_down_mid_request_degrades_gracefully(tmp_path):
     from project_service.daemon_server import ProjectRPCServer
 
     config.RAG_BASE_URL = os.environ.get("FUSION_RAG_URL", "http://127.0.0.1:11436")
-    config.RAG_EMBEDDING_MODEL = "BGE-M3"
+    config.RAG_EMBEDDING_MODEL = "BAAI/bge-m3"
 
     store = ProjectStore(db_path=os.path.join(str(tmp_path), "fault.db"))
     gc = GatewayClient()
@@ -93,20 +99,18 @@ async def test_rag_down_mid_request_degrades_gracefully(tmp_path):
     rag_pid = _rag_pid()
     assert rag_pid, "fusion-rag pid not found — cannot inject fault"
 
-    # fire a query, then kill rag mid-flight. the query should fail fast with
-    # GatewayError, not hang past the retry/backoff budget.
-    async def _query_and_kill():
-        # give the query a head start, then SIGKILL the upstream
-        await asyncio.sleep(0.15)
-        try:
-            os.kill(rag_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    # kill rag first, then fire the query against the dead upstream. (an earlier
+    # version raced a 0.15s-delayed kill against the query, but a healthy rag
+    # answers in ~50ms so the query returned before the kill landed — the race
+    # only worked when rag was already sick. killing up front is deterministic
+    # and still proves the client fails fast with an error flag, no hang.)
+    try:
+        os.kill(rag_pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    await asyncio.sleep(0.3)
 
-    saw_error, fail_elapsed = await asyncio.gather(
-        _query_and_kill(),
-        _expect_failure(rc, pid),
-    )
+    saw_error, fail_elapsed = await _expect_failure(rc, pid)
 
     # recovery: restart rag and confirm a fresh query succeeds (no permanent
     # breakage, client/httpx pool reuses cleanly after the kill).

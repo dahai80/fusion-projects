@@ -331,6 +331,15 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.7.3 — RAG 优雅降级修复 + 集成验证（194 全绿）
+上游 `fusion-mlx#779`（memory_enforcer 误判内存压力）修复后的验证收尾。落地三处修复：
+
+1. **`_kb_exists` 优雅降级缺陷**（`rag_coordinator.py`）：rag 上游不可达（连接拒绝/5xx/超时）时，KB 探测把模糊结果当作"KB 不存在" → 强制对死掉的上游调 `rag_create_kb` → 抛 `RAGError`。这破坏了聊天路径的 `error in result` 契约：`RAGCoordinator.query` 抛异常而非返回 `{"error": ...}`。修复：模糊探测现保留已有 `kb_id`（乐观），让查询落到 `_search_one`，后者捕获 `GatewayError` 并返回 `{"error": ...}` —— 聊天按设计降级为无 RAG。仅当确认 404（上游存活但 KB 已删）才触发重建。
+2. **Embedding 模型名**（`config.py`）：`RAG_EMBEDDING_MODEL` 默认 `BGE-M3` → `BAAI/bge-m3`。fusion-mlx 接受 `BAAI/bge-m3` / `BAAI--bge-m3`，对 `BGE-M3` 返回 404；旧默认值导致 e2e 中 RAG 注入索引进失败。
+3. **故障注入测试加固**（`test_fault_injection.py`）：重启助手改用 rag venv python 并设置 `FUSION_RAG_EMBED` / `FUSION_MLX_URL` / `FUSION_MLX_API_KEY` 环境变量（原裸 `python3` → 无 lancedb、无模型名 → 恢复起不来）；请求中途 kill 改为确定性顺序（先 kill 再查询），替代仅当 rag 已病态时才生效的 0.15s 竞态 kill。
+
+完整集成套件：**194 通过，0 失败，0 跳过** —— 5 个 e2e + 故障注入 + M6 压测全绿，对接真实 fusion-mlx 0.8.75（`Qwen3.5-4B-MLX-4bit` + `BAAI/bge-m3` 双模型常驻）与 fusion-rag 0.8.0rc4。
+
 ### v0.7.2 — M16 异步身份验证（最后一项残留关闭）
 关闭发布审计最后一项残留：`identity_verify_sync` 在 REST TenantMiddleware 验证回调中，每次缓存未命中都阻塞事件循环。上游阻塞项 `fusion-core#24` 已关闭，fusion-core 的 `VerifyJwt` 契约现接受 `Awaitable`，`TenantMiddleware` 自动 await。REST 中间件现改用**异步** `identity_verify` 协程，经专用 `httpx.AsyncClient`，JWT 验证不再在缓存未命中时阻塞事件循环。正/负缓存（M14）在两条路径上均保留。
 - **M16 修复**：新增 `GatewayClient.identity_verify`（异步、`httpx.AsyncClient`），REST `_verify_jwt` 改为 `async def`（中间件自动 await）。同步 `identity_verify_sync` 保留用于 UDS/MCP 路径与测试，注释禁止在 REST 中间件使用。

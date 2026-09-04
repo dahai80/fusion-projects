@@ -86,17 +86,23 @@ class RAGCoordinator:
         if status == 404:
             logger.warning("rag kb not found kb_id=%s, treating as stale", kb_id)
             return False
-        # ambiguous (5xx/-1/timeout): previously returned True and kept a
-        # possibly-dead kb_id, cascading all later ops to failure. retry once;
-        # still ambiguous -> treat as NOT existing so _ensure_kb recreates.
+        # ambiguous (5xx/-1/timeout/connection-refused): the upstream is
+        # unreachable or errored, NOT confirming the kb is gone. keep the kb_id
+        # (optimistic) so query() falls through to _search_one, which catches
+        # GatewayError and surfaces a graceful {"error": ...} — the chat path
+        # checks `error in result` and degrades to no-RAG. recreating here would
+        # call rag_create_kb against the dead upstream and RAISE RAGError,
+        # breaking that graceful-degradation contract. only a confirmed 404
+        # (upstream up, kb gone) triggers a recreate; retry once to split a
+        # transient 5xx from a hard connection failure.
         logger.warning("rag kb probe ambiguous kb_id=%s status=%s, retrying", kb_id, status)
         status2 = await self.upstream.rag_kb_status(kb_id=kb_id)
         if status2 == 200:
             return True
         if status2 == 404:
             return False
-        logger.warning("rag kb probe still ambiguous kb_id=%s status=%s, recreating", kb_id, status2)
-        return False
+        logger.warning("rag kb probe still ambiguous kb_id=%s status=%s, keeping kb_id (upstream down, degrade via search)", kb_id, status2)
+        return True
 
     async def get_always_include_context(self, project_id: str) -> tuple[str, list[dict]]:
         await self._ensure_project(project_id)
