@@ -588,6 +588,25 @@ this service:
 
 ## Changelog
 
+### v0.7.1 — Enterprise release-readiness verification pass
+Production-release verification: concurrency stress, upstream fault injection,
+and integration tests against live fusion-mlx/fusion-rag/fusion-gateway
+upstreams. All 191 tests green (0 skipped), including 5 real-model e2e chat
+tests, B1 event-loop stress, M6 RAG-concurrency stress, and fault injection.
+- **B1 stress test**: 80 concurrent store-write RPCs under a high-frequency
+  event-loop tick — verifies `to_thread` keeps the loop responsive
+  (max tick gap < 20× median; no blocking from sync sqlite).
+- **Fault injection**: kill fusion-rag mid-request — `RAGCoordinator.query`
+  surfaces an `error` flag (no silent empty result, no hang, fast-fail < 30s),
+  then restart + recovery verified. Closes the silent-failure audit pattern:
+  upstream-down queries previously returned empty results with no signal to
+  direct `project.rag.query` callers.
+- **Integration tests**: 5 e2e chat tests (instruction injection, RAG
+  knowledge injection, instruction+RAG, rag_mode=OFF skip, history limit)
+  verified against real loaded models.
+- **Test config fix**: stale e2e defaults (wrong mlx API key, nonexistent
+  model name) corrected so the suite runs without per-run env overrides.
+
 ### v0.7.0 — Enterprise release-blocker fix pass (audit-0904)
 Closes the 2 Blockers + 17 Major findings from the production-release audit
 (`audit/fusion-projects-audit-result-product-0904.md`). Every issue that

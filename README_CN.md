@@ -331,6 +331,13 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.7.1 — 企业级发布就绪验证
+生产发布验证：并发压测、上游故障注入、对接真实 fusion-mlx/fusion-rag/fusion-gateway 上游的集成测试。全部 191 个用例通过（0 跳过），含 5 个真实模型 e2e 聊天用例、B1 事件循环压测、M6 RAG 并发压测、故障注入。
+- **B1 压测**：80 个并发 store 写入 RPC + 高频事件循环探针 — 验证 `to_thread` 保持循环响应（最大 tick 间隔 < 中位数 20 倍；同步 sqlite 不阻塞）。
+- **故障注入**：请求中途杀死 fusion-rag — `RAGCoordinator.query` 返回 `error` 标志（无静默空结果、无挂起、30s 内快速失败），重启后恢复验证通过。修复静默失败审计模式：上游不可用时直连 `project.rag.query` 调用方此前拿到空结果无任何信号。
+- **集成测试**：5 个 e2e 聊天用例（指令注入、RAG 知识注入、指令+RAG、rag_mode=OFF 跳过、历史条数上限）对接真实加载模型验证通过。
+- **测试配置修复**：修正 e2e 陈旧默认值（错误的 mlx API key、不存在的模型名），套件无需逐次 env 覆盖即可运行。
+
 ### v0.7.0 — 企业级发布阻塞问题修复（audit-0904）
 关闭生产发布审计（`audit/fusion-projects-audit-result-product-0904.md`）中的 2 个致命 + 17 个 Major 问题。所有阻塞企业级商业生产发布的问题已解决：
 - **B1 — 同步 sqlite 阻塞事件循环**：engine 层所有同步 `sqlite3` store 调用均通过 `asyncio.to_thread(...` 包裹。单连接 + `RLock`（`check_same_thread=False`）跨线程安全，事件循环不再因磁盘 I/O 阻塞。约 60 处调用已转换。

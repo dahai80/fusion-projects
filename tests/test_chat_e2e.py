@@ -6,19 +6,21 @@ import pytest
 pytestmark = pytest.mark.integration
 
 FUSION_GATEWAY_API_KEY = os.environ.get("FUSION_GATEWAY_API_KEY", "fg-demo-key-change-me")
-# fusion-mlx settings.json auth.api_key is "dahai168". The shell env may carry a
-# DIFFERENT FUSION_MLX_API_KEY (set by other fusion services) so we only honor it
-# when the test explicitly overrides via FUSION_E2E_MLX_API_KEY.
-FUSION_MLX_API_KEY = os.environ.get("FUSION_E2E_MLX_API_KEY", "dahai168")
+# fusion-mlx settings.json auth.api_key is "fg-admin-key". The shell env may
+# carry a DIFFERENT FUSION_MLX_API_KEY (set by other fusion services) so we only
+# honor it when the test explicitly overrides via FUSION_E2E_MLX_API_KEY.
+FUSION_MLX_API_KEY = os.environ.get("FUSION_E2E_MLX_API_KEY", "fg-admin-key")
 
 INSTR_KEYWORD = "PINEAPPLE"
 KB_FACT = "The secret launch code is 7Z9-Q4K."
 
-# E2E chat model — must be a real loaded chat model on fusion-mlx (11434).
-# Override via FUSION_E2E_MODEL. Default Qwen3.5-4B-bf16 is a confirmed-loaded
-# text chat model. (Qwen3-0.6B-4bit triggers fusion-mlx DraftModelDecoder.config
-# AttributeError — upstream bug, tracked separately; do not use here.)
-E2E_MODEL = os.environ.get("FUSION_E2E_MODEL", "Qwen3.5-4B-bf16")
+# E2E chat model — must be a real cached chat model on fusion-mlx (11434);
+# the server lazy-loads it on first chat-completions call. Override via
+# FUSION_E2E_MODEL. Default mlx-community--Qwen3.5-4B-MLX-4bit is a confirmed
+# cached text chat model (small + fast for CI). (Qwen3-0.6B-4bit triggers
+# fusion-mlx DraftModelDecoder.config AttributeError — upstream bug, tracked
+# separately; do not use here.)
+E2E_MODEL = os.environ.get("FUSION_E2E_MODEL", "mlx-community--Qwen3.5-4B-MLX-4bit")
 
 
 def _upstreams_up() -> bool:

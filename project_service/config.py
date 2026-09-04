@@ -22,7 +22,7 @@ DB_PATH = DATA_DIR / "projects.db"
 LOG_DIR = BASE_DIR / "logs"
 
 RAG_BASE_URL = os.environ.get("FUSION_RAG_URL", "http://127.0.0.1:11436")
-RAG_EMBEDDING_MODEL = os.environ.get("FUSION_RAG_EMBEDDING_MODEL", "BAAI--bge-m3")
+RAG_EMBEDDING_MODEL = os.environ.get("FUSION_RAG_EMBEDDING_MODEL", "BGE-M3")
 AGENT_STUDIO_URL = os.environ.get("FUSION_AGENT_STUDIO_URL", "http://127.0.0.1:11455")
 GATEWAY_URL = os.environ.get("FUSION_GATEWAY_URL", "http://127.0.0.1:11432")
 ARTIFACTS_URL = os.environ.get("FUSION_ARTIFACTS_URL", "http://127.0.0.1:8892")

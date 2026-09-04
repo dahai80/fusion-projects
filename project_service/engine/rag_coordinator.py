@@ -257,6 +257,8 @@ class RAGCoordinator:
         else:
             prefixes = [None]
 
+        upstream_failures: list[str] = []
+
         async def _search_one(prefix: Optional[str]) -> list:
             try:
                 result = await self.upstream.rag_search(
@@ -264,6 +266,7 @@ class RAGCoordinator:
                 )
             except GatewayError as e:
                 logger.warning("rag query failed project=%s prefix=%s error=%s", project_id, prefix, e)
+                upstream_failures.append(str(e))
                 return []
             return result if isinstance(result, list) else result.get("results", result.get("data", []))
 
@@ -277,7 +280,13 @@ class RAGCoordinator:
             "rag query project=%s mode=%s folders=%d raw=%d recalled=%d below=%d",
             project_id, rag_mode, len(prefixes), total_raw, len(items), dropped_below,
         )
-        return {"results": items, "sources": sources, "mode": rag_mode}
+        result: dict = {"results": items, "sources": sources, "mode": rag_mode}
+        # surface upstream failure so direct callers (project.rag.query RPC) can
+        # distinguish "no docs" from "kb backend dead". the chat path checks
+        # `error not in result` and degrades to no-RAG, so chat stays best-effort.
+        if upstream_failures and len(upstream_failures) == len(prefixes):
+            result["error"] = "rag upstream unavailable: " + upstream_failures[0]
+        return result
 
     @staticmethod
     def _merge_results(groups: list[list], *, top_k: int, threshold: float) -> tuple[list, int]:
