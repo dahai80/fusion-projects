@@ -203,3 +203,90 @@ def test_identity_verify_negative_cache(tmp_path, monkeypatch):
     assert snap["identity_verify_fail"] == 1
     assert snap["identity_verify_cached"] == 1
     metrics.reset()
+
+
+async def test_identity_verify_async_negative_cache(tmp_path, monkeypatch):
+    # M16: the async identity_verify path (used by the REST TenantMiddleware)
+    # must mirror the sync negative-cache behavior so a flood of bad-token
+    # requests doesn't each round-trip to fusion-identity.
+    import httpx
+    from project_service.engine.gateway_client import GatewayClient, GatewayError
+    metrics.reset()
+    monkeypatch.setattr(config, "IDENTITY_SERVICE_TOKEN", "svc-tok")
+    monkeypatch.setattr(config, "IDENTITY_VERIFY_CACHE_TTL", 5)
+    gc = GatewayClient()
+    call_count = {"n": 0}
+
+    class _FakeResp:
+        status_code = 401
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError(
+                "401", request=httpx.Request("POST", "x"), response=httpx.Response(401),
+            )
+
+    class _FakeAsyncClient:
+        async def post(self, *a, **k):
+            call_count["n"] += 1
+            return _FakeResp()
+
+        async def aclose(self):
+            pass
+
+    gc._verify_async_client = _FakeAsyncClient()
+    # first call hits the network + caches the denial
+    with pytest.raises(GatewayError):
+        await gc.identity_verify("bad-token")
+    assert call_count["n"] == 1
+    # second call served from the negative cache — no network hit
+    with pytest.raises(GatewayError):
+        await gc.identity_verify("bad-token")
+    assert call_count["n"] == 1
+    snap = metrics.snapshot()
+    assert snap["identity_verify_fail"] == 1
+    assert snap["identity_verify_cached"] == 1
+    await gc.close()
+    metrics.reset()
+
+
+async def test_identity_verify_async_success_cache(tmp_path, monkeypatch):
+    # M16: async positive cache — a successful verify is cached, repeat calls
+    # skip the network and return the cached claims.
+    from project_service.engine.gateway_client import GatewayClient
+    metrics.reset()
+    monkeypatch.setattr(config, "IDENTITY_SERVICE_TOKEN", "svc-tok")
+    monkeypatch.setattr(config, "IDENTITY_VERIFY_CACHE_TTL", 5)
+    gc = GatewayClient()
+    call_count = {"n": 0}
+    claims = {"sub": "user-1", "tenant_id": "tnt-1"}
+
+    class _FakeResp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return claims
+
+    class _FakeAsyncClient:
+        async def post(self, *a, **k):
+            call_count["n"] += 1
+            return _FakeResp()
+
+        async def aclose(self):
+            pass
+
+    gc._verify_async_client = _FakeAsyncClient()
+    first = await gc.identity_verify("good-token")
+    assert first == claims
+    assert call_count["n"] == 1
+    # second call served from positive cache — no network hit
+    second = await gc.identity_verify("good-token")
+    assert second == claims
+    assert call_count["n"] == 1
+    snap = metrics.snapshot()
+    assert snap["identity_verify_ok"] == 1
+    assert snap["identity_verify_cached"] == 1
+    await gc.close()
+    metrics.reset()

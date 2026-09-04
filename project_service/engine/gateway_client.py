@@ -77,6 +77,7 @@ class GatewayClient:
         self._verify_neg_cache: dict[str, float] = {}
         self._verify_cache_ttl = config.IDENTITY_VERIFY_CACHE_TTL
         self._verify_client = httpx.Client(timeout=config.IDENTITY_VERIFY_TIMEOUT)
+        self._verify_async_client = httpx.AsyncClient(timeout=config.IDENTITY_VERIFY_TIMEOUT)
         logger.info("GatewayClient ready gateway=%s rag=%s agent=%s artifacts=%s auth=%s",
                      self._gateway_url, self._rag_url, self._agent_url, self._artifacts_url,
                      "on" if self._api_key else "off")
@@ -96,6 +97,10 @@ class GatewayClient:
             self._verify_client.close()
         except Exception as e:
             logger.warning("identity verify client close failed: %s", e)
+        try:
+            await self._verify_async_client.aclose()
+        except Exception as e:
+            logger.warning("identity verify async client close failed: %s", e)
         logger.info("GatewayClient closed")
 
     def _auth_headers(self) -> dict:
@@ -324,20 +329,67 @@ class GatewayClient:
             raise
 
     # ── fusion-identity (tenant registry + JWT issuer) ──
-    # verify is called from the sync verify_jwt callback inside TenantMiddleware,
-    # so it must stay synchronous (no await). a short local httpx.Client is fine.
+    # async verify is the primary path: fusion-core's VerifyJwt contract accepts
+    # an Awaitable, and TenantMiddleware auto-awaits it (fusion-core#24 closed).
+    # This keeps the event loop unblocked on every cache miss — M16 fixed.
+    # identity_verify_sync stays for the UDS daemon / MCP paths where the
+    # callback may be invoked outside an async verify callable, and for tests.
+
+    async def identity_verify(self, token: str) -> dict:
+        if not self._identity_service_token:
+            raise GatewayError("identity service token not configured")
+        # short-TTL positive cache: a verified token is reused for a few seconds
+        # so repeated requests don't each round-trip to fusion-identity.
+        # M14: negative cache — a denied/failed verify is remembered for the TTL
+        # so a flood of bad-token requests doesn't each round-trip.
+        ttl = self._verify_cache_ttl
+        now = time.monotonic()
+        if ttl > 0:
+            cached = self._verify_cache.get(token)
+            if cached and cached[1] > now:
+                metrics.record_identity_verify(ok=True, cached=True)
+                return cached[0]
+            neg = self._verify_neg_cache.get(token)
+            if neg and neg > now:
+                metrics.record_identity_verify(ok=False, cached=True)
+                raise GatewayError("identity verify cached denial")
+        url = f"{self._identity_url}/api/v1/auth/verify"
+        headers = {"Authorization": f"Bearer {self._identity_service_token}"}
+        try:
+            resp = await self._verify_async_client.post(url, json={"token": token}, headers=headers)
+            resp.raise_for_status()
+            claims = resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("identity verify %d: %s", e.response.status_code, e)
+            if ttl > 0:
+                self._verify_neg_cache[token] = now + ttl
+                if len(self._verify_neg_cache) > 1024:
+                    self._verify_neg_cache = {k: v for k, v in self._verify_neg_cache.items() if v > now}
+            metrics.record_identity_verify(ok=False)
+            raise GatewayError(f"identity verify -> {e.response.status_code}") from e
+        except (httpx.TimeoutException, httpx.RequestError) as e:
+            logger.warning("identity verify error: %s", e)
+            if ttl > 0:
+                self._verify_neg_cache[token] = now + ttl
+                if len(self._verify_neg_cache) > 1024:
+                    self._verify_neg_cache = {k: v for k, v in self._verify_neg_cache.items() if v > now}
+            metrics.record_identity_verify(ok=False)
+            raise GatewayError(f"identity verify error: {e}") from e
+        if ttl > 0:
+            self._verify_cache[token] = (claims, now + ttl)
+            self._verify_neg_cache.pop(token, None)
+            if len(self._verify_cache) > 1024:
+                self._verify_cache = {k: v for k, v in self._verify_cache.items() if v[1] > now}
+        metrics.record_identity_verify(ok=True)
+        return claims
 
     def identity_verify_sync(self, token: str) -> dict:
         if not self._identity_service_token:
             raise GatewayError("identity service token not configured")
-        # short-TTL positive cache: a verified token is reused for a few seconds
-        # so repeated requests don't each block the event-loop thread on a sync
-        # HTTP call. VerifyJwt is sync by fusion-core contract, so the verify
-        # call itself still blocks the loop thread when uncached — a full async
-        # fix waits on fusion-core#24 (async verify_jwt). the caches below cut
-        # the blocking frequency to near-zero for repeated tokens (M16 mitigation).
-        # M14: negative cache — a denied/failed verify is remembered for the TTL
-        # so a flood of bad-token requests doesn't each block on a sync roundtrip.
+        # sync fallback for UDS/MCP paths invoked outside an async verify
+        # callable, and for tests. positive + negative caches mirror the async
+        # path; the sync httpx.Client still blocks the calling thread, so this
+        # path must NOT be wired into the REST middleware (use identity_verify).
         ttl = self._verify_cache_ttl
         now = time.monotonic()
         if ttl > 0:

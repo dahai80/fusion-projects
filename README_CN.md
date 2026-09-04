@@ -331,6 +331,12 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.7.2 — M16 异步身份验证（最后一项残留关闭）
+关闭发布审计最后一项残留：`identity_verify_sync` 在 REST TenantMiddleware 验证回调中，每次缓存未命中都阻塞事件循环。上游阻塞项 `fusion-core#24` 已关闭，fusion-core 的 `VerifyJwt` 契约现接受 `Awaitable`，`TenantMiddleware` 自动 await。REST 中间件现改用**异步** `identity_verify` 协程，经专用 `httpx.AsyncClient`，JWT 验证不再在缓存未命中时阻塞事件循环。正/负缓存（M14）在两条路径上均保留。
+- **M16 修复**：新增 `GatewayClient.identity_verify`（异步、`httpx.AsyncClient`），REST `_verify_jwt` 改为 `async def`（中间件自动 await）。同步 `identity_verify_sync` 保留用于 UDS/MCP 路径与测试，注释禁止在 REST 中间件使用。
+- **异步验证客户端生命周期**：异步客户端在 `__init__` 创建，`GatewayClient.close()` 中 `aclose()`。
+- **测试**：异步负缓存 + 正缓存用例，外加端到端 REST 用例证明有效 Bearer token + `X-Tenant-Id` 通过异步网关。186 离线用例通过。
+
 ### v0.7.1 — 企业级发布就绪验证
 生产发布验证：并发压测、上游故障注入、对接真实 fusion-mlx/fusion-rag/fusion-gateway 上游的集成测试。全部 191 个用例通过（0 跳过），含 5 个真实模型 e2e 聊天用例、B1 事件循环压测、M6 RAG 并发压测、故障注入。
 - **B1 压测**：80 个并发 store 写入 RPC + 高频事件循环探针 — 验证 `to_thread` 保持循环响应（最大 tick 间隔 < 中位数 20 倍；同步 sqlite 不阻塞）。

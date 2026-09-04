@@ -63,7 +63,7 @@ def create_app(
         except Exception as e:
             logger.error("project store close failed: %s", e)
 
-    app = FastAPI(title="Fusion-Projects", version="0.7.1", lifespan=lifespan)
+    app = FastAPI(title="Fusion-Projects", version="0.7.2", lifespan=lifespan)
     injected_store = getattr(project_manager, "store", None) if project_manager else None
     if project_manager is not None:
         pm = project_manager
@@ -113,8 +113,8 @@ def create_app(
             "/openapi.json", "/docs/oauth2-redirect",
         })
 
-        def _verify_jwt(token: str) -> dict:
-            return gateway_client.identity_verify_sync(token)
+        async def _verify_jwt(token: str) -> dict:
+            return await gateway_client.identity_verify(token)
 
         try:
             install_tenant_middleware(

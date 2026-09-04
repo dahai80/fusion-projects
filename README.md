@@ -588,6 +588,25 @@ this service:
 
 ## Changelog
 
+### v0.7.2 — M16 async identity verify (last residual closed)
+Closes the final release-audit residual: `identity_verify_sync` blocked the
+event loop on every cache miss inside the REST TenantMiddleware verify
+callback. With the upstream blocker `fusion-core#24` now closed, fusion-core's
+`VerifyJwt` contract accepts an `Awaitable` and `TenantMiddleware` auto-awaits
+it. The REST middleware now wires an **async** `identity_verify` coroutine
+through a dedicated `httpx.AsyncClient`, so JWT verification never blocks the
+event loop on a cache miss. Positive + negative caches (M14) are preserved on
+both paths.
+- **M16 fix**: new `GatewayClient.identity_verify` (async, `httpx.AsyncClient`),
+  REST `_verify_jwt` switched to `async def` (middleware auto-awaits). The sync
+  `identity_verify_sync` is retained for UDS/MCP paths and tests, with a
+  comment forbidding its use in the REST middleware.
+- **Async verify client lifecycle**: the async client is created in `__init__`
+  and `aclose()`d in `GatewayClient.close()`.
+- **Tests**: async negative-cache + positive-cache tests, plus an end-to-end
+  REST test proving a valid Bearer token + `X-Tenant-Id` passes the async gate.
+  186 offline tests green.
+
 ### v0.7.1 — Enterprise release-readiness verification pass
 Production-release verification: concurrency stress, upstream fault injection,
 and integration tests against live fusion-mlx/fusion-rag/fusion-gateway

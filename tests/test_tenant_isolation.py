@@ -139,6 +139,29 @@ async def test_rest_exempt_paths_pass(rest_app):
         assert r.status_code == 200
 
 
+async def test_rest_async_verify_jwt_passes_valid_token(rest_app):
+    # M16: the REST middleware must auto-await the async _verify_jwt callable
+    # (fusion-core#24). A request with a valid Bearer token + X-Tenant-Id must
+    # pass the gate and reach the route (200), proving the async path works
+    # end-to-end and the loop is never blocked on a sync verify.
+    app, rs_mod = rest_app
+    gc = app.state.gateway_client
+    claims = {"sub": "user-1", "tenant_id": "tenantA", "scope": "projects:read"}
+
+    async def _fake_verify(token):
+        assert token == "valid-jwt"
+        return claims
+
+    gc.identity_verify = _fake_verify
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get(
+            "/api/v1/projects",
+            headers={"Authorization": "Bearer valid-jwt", "X-Tenant-Id": "tenantA"},
+        )
+        assert r.status_code == 200, r.text
+
+
 def test_rest_tenant_middleware_installed(rest_app):
     app, _ = rest_app
     from fusion_core.tenant import TenantMiddleware
