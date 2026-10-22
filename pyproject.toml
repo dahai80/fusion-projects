@@ -9,10 +9,16 @@ dependencies = [
     "aiofiles>=23.0.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
-    "fusion-core",
 ]
 
 [project.optional-dependencies]
+# fusion-core is a local in-tree monorepo package (not on PyPI) — it lives
+# in an optional extra, matching fusion-agent-studio. All fusion_core
+# imports are lazy + fail-soft, so its absence degrades gracefully to
+# single-tenant mode in CI/local-dev. Install with `.[tenant]`.
+tenant = [
+    "fusion-core>=0.1.0",
+]
 test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
