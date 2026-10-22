@@ -309,7 +309,7 @@ async def main() -> int:
     logger.info("RAG 索引完成: %d/%d 文件已索引", indexed_ok, total_files)
 
     DEFAULT_AGENT_PREFERRED = ["ExecBot", "DispatchBot", "ToolBot", "SoulBot"]
-    logger.info("列出可用 Agent（来自 fusion-agent-studio api_server 11455）...")
+    logger.info("列出可用 Agent（来自 fusion-agent-studio api_server 11442）...")
     bound_agent_id = None
     try:
         agents = await client.call("project.agent.list", {})

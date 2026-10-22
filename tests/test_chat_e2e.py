@@ -59,7 +59,7 @@ async def e2e_server(tmp_path):
     config.GATEWAY_URL = "http://127.0.0.1:11434"
     config.GATEWAY_API_KEY = FUSION_MLX_API_KEY
     config.RAG_BASE_URL = "http://127.0.0.1:11436"
-    config.AGENT_STUDIO_URL = "http://127.0.0.1:11455"
+    config.AGENT_STUDIO_URL = "http://127.0.0.1:11442"
 
     from project_service.store.project_store import ProjectStore
     from project_service.store.file_store import FileStore

@@ -22,7 +22,7 @@ optional REST API.
 > exempt), per-IP rate limiting, request body size cap, SQLite WAL + busy_timeout,
 > UDS socket 0o600, graceful SIGTERM shutdown with client cleanup, secret-file
 > key loading, knowledge upload path-traversal + size guards.
-> **v0.3.1 patch:** AGENT_STUDIO_URL default 8000→11455 aligned with the fusion
+> **v0.3.1 patch:** AGENT_STUDIO_URL default 8000→11442 aligned with the fusion
 > 114xx port convention (fixes agent binding connectivity, #22); douyin e-commerce
 > AgentGraph now fetches product main images + real CDP publish (#23).
 > **v0.3.2 patch — E2E assembly (Claude Projects core capability):** chat now
@@ -500,7 +500,7 @@ project defines no ruff config (do not invent one).
 - `GET /health` — liveness, always 200 `{"status":"ok"}` (no dependency probe).
 - `GET /ready` — **readiness**. Fans out to all three upstreams concurrently
   (`asyncio.gather`): `gateway_is_healthy` (11432), `rag_is_healthy` (11436),
-  `agent_studio_is_healthy` (11455). Returns `200 {"status":"ready","deps":{...}}`
+  `agent_studio_is_healthy` (11442). Returns `200 {"status":"ready","deps":{...}}`
   when all reachable, else `503 {"status":"degraded","deps":{...}}` naming which
   dependency is down. `/ready` is a public path (auth-exempt) so load balancers
   and orchestrators can probe it without credentials.
