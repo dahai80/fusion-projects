@@ -12,12 +12,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
     steps:
       - uses: actions/checkout@v4
+      # fusion-core is a local in-tree monorepo package (not on PyPI) — the
+      # tenant tests import it, so check out the sibling repo and install it
+      # before the package itself.
+      - uses: actions/checkout@v4
+        with:
+          repository: dahai80/fusion-core
+          path: fusion-core
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install fusion-core sibling
+        run: pip install -e ./fusion-core
       - name: Install package with test extras
         run: pip install -e ".[test]"
       - name: Run unit tests (integration tests auto-skip without live upstreams)

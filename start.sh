@@ -15,9 +15,9 @@ BOOT_LOG="$LOG_DIR/boot.log"
 ENTRY="python3 -m project_service.daemon_server"
 SOCK_PATH="${FUSION_PROJECT_SOCK:-/tmp/fusion-project-svc.sock}"
 
-# 上游 fusion-agent-studio 的 HTTP api_server 端口（issue#100 修复后 daemon 在 11455 起 FastAPI）。
+# 上游 fusion-agent-studio 的 HTTP api_server 端口（issue#100 修复后 daemon 在 11442 起 FastAPI）。
 # 默认与 agent-studio 对齐；如需覆盖导出 FUSION_AGENT_STUDIO_URL 即可。
-export FUSION_AGENT_STUDIO_URL="${FUSION_AGENT_STUDIO_URL:-http://127.0.0.1:11455}"
+export FUSION_AGENT_STUDIO_URL="${FUSION_AGENT_STUDIO_URL:-http://127.0.0.1:11442}"
 
 mkdir -p "$LOG_DIR"
 
