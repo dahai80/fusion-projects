@@ -63,7 +63,7 @@ def create_app(
         except Exception as e:
             logger.error("project store close failed: %s", e)
 
-    app = FastAPI(title="Fusion-Projects", version="0.7.3", lifespan=lifespan)
+    app = FastAPI(title="Fusion-Projects", version="0.7.4", lifespan=lifespan)
     injected_store = getattr(project_manager, "store", None) if project_manager else None
     if project_manager is not None:
         pm = project_manager
@@ -191,7 +191,9 @@ app = create_app()
 
 def main() -> None:
     from project_service.logging_config import setup_logging
+    from project_service.proc_title import set_process_title
 
+    set_process_title("fusion-projects rest")
     setup_logging(config.LOG_DIR / "rest.log")
     logger.info("starting REST on %s:%s", config.REST_HOST, config.REST_PORT)
     uvicorn.run(app, host=config.REST_HOST, port=config.REST_PORT, log_level="info")

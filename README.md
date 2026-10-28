@@ -361,13 +361,15 @@ MCP: `POST /mcp` (JSON-RPC 2.0 with tools/list, tools/call, initialize)
 | `FUSION_PROJECT_SOCK` | `/tmp/fusion-project-svc.sock` | UDS socket path |
 | `FUSION_PROJECT_HOST` | `127.0.0.1` | REST host |
 | `FUSION_PROJECT_PORT` | `11440` | REST port |
-| `FUSION_PROJECT_HOME` | `~/.fusion-projects` | data + storage root |
-| `FUSION_MLX_URL` | `http://127.0.0.1:11434/v1` | fusion-mlx base URL |
-| `FUSION_MLX_API_KEY` | `""` | fusion-mlx Bearer token |
+| `FUSION_PROJECT_DATA_DIR` | `~/.fusion-projects` | data + storage root (canonical, fusion-core `service_data_dir`) |
+| `FUSION_PROJECT_HOME` | `~/.fusion-projects` | data + storage root (legacy alias, still honored) |
+| `FUSION_CLIENT_KEY` | `""` | gateway Bearer token (canonical, fusion-core `client_key`; `FUSION_PROFILE=prod` fails fast when unset) |
+| `FUSION_GATEWAY_API_KEY` | `""` | gateway Bearer token (per-service legacy, checked first for zero-breakage) |
+| `FUSION_GATEWAY_BASE_URL` | `http://127.0.0.1:11432` | fusion-gateway URL (canonical, fusion-core `gateway_base_url`) |
+| `FUSION_GATEWAY_URL` | `http://127.0.0.1:11432` | fusion-gateway URL (legacy alias, still honored) |
 | `FUSION_RAG_URL` | `http://127.0.0.1:11436` | fusion-rag/kb base URL |
-| `FUSION_RAG_EMBEDDING_MODEL` | `BAAI--bge-m3` | embedding model ID for KB creation |
-| `FUSION_AGENT_STUDIO_URL` | `http://127.0.0.1:8000` | agent-studio URL |
-| `FUSION_GATEWAY_URL` | `http://127.0.0.1:8100` | fusion-gateway URL |
+| `FUSION_RAG_EMBEDDING_MODEL` | `BAAI/bge-m3` | embedding model ID for KB creation |
+| `FUSION_AGENT_STUDIO_URL` | `http://127.0.0.1:11442` | agent-studio URL |
 | `FUSION_GATEWAY_URL` | `http://127.0.0.1:11432` | fusion-gateway base URL
 
 ## RAG E2E chain
@@ -587,6 +589,34 @@ this service:
   → JSON-RPC −32011 / HTTP 502, so callers see a clear error, not a silent hang.
 
 ## Changelog
+
+### v0.7.4 — Process title + fusion-core config migration (#33 #34)
+Closes #33 and #34. Two fixes landed:
+
+1. **Process title remediation (#33)**: the daemon process showed as bare
+   homebrew `Python` in `ps`/Activity Monitor. New `project_service/proc_title.py`
+   wraps `fusion_core.proc.set_process_title` (with a direct-`setproctitle`
+   fail-soft fallback when fusion-core is absent) — the UDS daemon now runs as
+   `fusion-projects daemon`, the REST server as `fusion-projects rest`.
+   `start.sh`'s `_pid_is_daemon` identity check matches both the original entry
+   cmdline and the product title, so pid/pkill/status/backup logic is unchanged.
+   `setproctitle>=1.3.0` added to core dependencies.
+2. **fusion_core.config single-point resolution (#34)** (config Phase 2.2):
+   `GATEWAY_API_KEY` resolution moved to `fusion_core.config.client_key()`
+   (canonical `FUSION_CLIENT_KEY`, deprecated alias chain lives only in
+   fusion-core; `FUSION_PROFILE=prod` without a key now fails fast with
+   RuntimeError, dev stays empty + warning). `GATEWAY_URL` uses
+   `gateway_base_url()` (canonical `FUSION_GATEWAY_BASE_URL`, legacy
+   `FUSION_GATEWAY_URL` still honored via fusion-core with a deprecation
+   warning), `REST_PORT` uses `service_port("project", 11440)`, `BASE_DIR` uses
+   `service_data_dir("project", ...)` (canonical `FUSION_PROJECT_DATA_DIR`,
+   legacy `FUSION_PROJECT_HOME` kept). All adoptions are lazy + fail-soft
+   (fusion-core is an optional extra); the historical per-service
+   `FUSION_GATEWAY_API_KEY` still wins for zero-breakage. This repo now has 0
+   legacy-key references — `scripts/check-env.py` is clean for fusion-projects.
+
+Offline suite: **199 passed, 0 failed** (+13 new tests covering both fixes).
+Live-verified: `ps -o comm` shows `fusion-projects`, ping reports `0.7.4`.
 
 ### v0.7.3 — RAG graceful-degradation fix + integration verification (194 green)
 Closes the verification pass after upstream `fusion-mlx#779` (memory_enforcer

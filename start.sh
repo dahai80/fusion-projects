@@ -23,13 +23,15 @@ mkdir -p "$LOG_DIR"
 
 # process-identity check: a live PID is ours only if its cmdline still
 # references the daemon entry. prevents stale-PID reuse → false "already running".
+# issue #33: setproctitle renames the process to "fusion-projects daemon" once
+# running, so both the original entry cmdline and the product title are ours.
 _pid_is_daemon() {
     local pid="$1"
     local cmd
     cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
     [ -n "$cmd" ] || return 1
     case "$cmd" in
-        *project_service.daemon_server*) return 0 ;;
+        *project_service.daemon_server*|*"fusion-projects daemon"*) return 0 ;;
         *) return 1 ;;
     esac
 }

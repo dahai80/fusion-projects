@@ -1,6 +1,6 @@
 [project]
 name = "fusion-project-svc"
-version = "0.7.3"
+version = "0.7.4"
 description = "Fusion-Projects - local-first AI project asset container service"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,6 +9,7 @@ dependencies = [
     "aiofiles>=23.0.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
+    "setproctitle>=1.3.0",
 ]
 
 [project.optional-dependencies]

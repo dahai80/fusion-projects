@@ -247,11 +247,15 @@ MCP：`POST /mcp`（JSON-RPC 2.0，支持 tools/list、tools/call、initialize�
 | `FUSION_PROJECT_SOCK` | `/tmp/fusion-project-svc.sock` | UDS 套接字路径 |
 | `FUSION_PROJECT_HOST` | `127.0.0.1` | REST 主机 |
 | `FUSION_PROJECT_PORT` | `11440` | REST 端口 |
-| `FUSION_PROJECT_HOME` | `~/.fusion-projects` | 数据 + 存储根目录 |
+| `FUSION_PROJECT_DATA_DIR` | `~/.fusion-projects` | 数据 + 存储根目录（规范名，fusion-core `service_data_dir`） |
+| `FUSION_PROJECT_HOME` | `~/.fusion-projects` | 数据 + 存储根目录（旧别名，仍然生效） |
+| `FUSION_CLIENT_KEY` | `""` | gateway Bearer 令牌（规范名，fusion-core `client_key`；`FUSION_PROFILE=prod` 未设置时启动即报错） |
+| `FUSION_GATEWAY_API_KEY` | `""` | gateway Bearer 令牌（本服务旧名，优先级最高，保证零破坏） |
+| `FUSION_GATEWAY_BASE_URL` | `http://127.0.0.1:11432` | fusion-gateway URL（规范名，fusion-core `gateway_base_url`） |
+| `FUSION_GATEWAY_URL` | `http://127.0.0.1:11432` | fusion-gateway URL（旧别名，仍然生效） |
 | `FUSION_RAG_URL` | `http://127.0.0.1:11436` | fusion-rag/kb 基础 URL |
-| `FUSION_RAG_EMBEDDING_MODEL` | `BAAI--bge-m3` | 知识库创建时使用的嵌入模型 ID |
-| `FUSION_AGENT_STUDIO_URL` | `http://127.0.0.1:8000` | agent-studio URL |
-| `FUSION_GATEWAY_URL` | `http://127.0.0.1:11432` | fusion-gateway URL |
+| `FUSION_RAG_EMBEDDING_MODEL` | `BAAI/bge-m3` | 知识库创建时使用的嵌入模型 ID |
+| `FUSION_AGENT_STUDIO_URL` | `http://127.0.0.1:11442` | agent-studio URL |
 
 ## RAG 端到端链路
 
@@ -330,6 +334,15 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 - 4 空格缩进，无 docstring。
 
 ## 变更日志
+
+### v0.7.4 — 进程标题 + fusion-core 配置迁移（#33 #34）
+关闭 #33 与 #34。落地两处修复：
+
+1. **进程标题整改（#33）**：daemon 进程在 `ps`/活动监视器里显示为裸 homebrew `Python`。新增 `project_service/proc_title.py`，封装 `fusion_core.proc.set_process_title`（fusion-core 缺席时直接走 `setproctitle` 失败安全兜底）—— UDS daemon 现显示为 `fusion-projects daemon`，REST 服务显示为 `fusion-projects rest`。`start.sh` 的 `_pid_is_daemon` 身份校验同时匹配原始入口 cmdline 与产品标题，pid/pkill/status/backup 逻辑不变。核心依赖新增 `setproctitle>=1.3.0`。
+2. **fusion_core.config 单点配置解析（#34）**（config Phase 2.2）：`GATEWAY_API_KEY` 解析迁移到 `fusion_core.config.client_key()`（规范名 `FUSION_CLIENT_KEY`，废弃别名链只存在于 fusion-core；`FUSION_PROFILE=prod` 缺 key 启动即 RuntimeError，dev 保持空值 + 警告）。`GATEWAY_URL` 走 `gateway_base_url()`（规范名 `FUSION_GATEWAY_BASE_URL`，旧名 `FUSION_GATEWAY_URL` 经 fusion-core 带废弃警告继续生效），`REST_PORT` 走 `service_port("project", 11440)`，`BASE_DIR` 走 `service_data_dir("project", ...)`（规范名 `FUSION_PROJECT_DATA_DIR`，旧名 `FUSION_PROJECT_HOME` 保留）。全部采用 lazy + fail-soft（fusion-core 是可选依赖）；历史本服务名 `FUSION_GATEWAY_API_KEY` 仍优先，保证零破坏。本仓 legacy key 引用清零 —— `scripts/check-env.py` 对 fusion-projects 无告警。
+
+离线套件：**199 通过，0 失败**（新增 13 个测试覆盖两处修复）。
+活体验证：`ps -o comm` 显示 `fusion-projects`，ping 返回 `0.7.4`。
 
 ### v0.7.3 — RAG 优雅降级修复 + 集成验证（194 全绿）
 上游 `fusion-mlx#779`（memory_enforcer 误判内存压力）修复后的验证收尾。落地三处修复：

@@ -5,17 +5,71 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# issue #34: single-point resolution lives in fusion_core.config (config
+# Phase 2.2). fusion-core is an optional extra, so every adoption below is
+# lazy + fail-soft: when absent, an inline fallback with identical defaults
+# keeps the service runnable. the deprecated key alias chain exists ONLY
+# inside fusion_core.config.client_key — never re-inlined here (check-env
+# rule 2c flags any source line naming those keys).
+
+
+def _fc_config():
+    try:
+        from fusion_core import config as fc_config
+    except Exception:
+        return None
+    return fc_config
+
+
+def _gateway_api_key() -> str:
+    # FUSION_GATEWAY_API_KEY is this service's historical per-service name and
+    # stays first for zero-breakage; fusion-core's client_key() (canonical
+    # FUSION_CLIENT_KEY chain + dev/prod profile semantics) backs it.
+    key = os.environ.get("FUSION_GATEWAY_API_KEY", "")
+    if key:
+        return key
+    fc = _fc_config()
+    if fc is not None:
+        return fc.client_key()
+    return ""
+
+
+def _gateway_url() -> str:
+    fc = _fc_config()
+    if fc is not None:
+        return fc.gateway_base_url()
+    return os.environ.get("FUSION_GATEWAY_URL", "http://127.0.0.1:11432")
+
+
+def _rest_port() -> int:
+    fc = _fc_config()
+    if fc is not None:
+        return fc.service_port("project", 11440)
+    return int(os.environ.get("FUSION_PROJECT_PORT", "11440"))
+
+
+def _base_dir() -> Path:
+    # canonical: FUSION_PROJECT_DATA_DIR (fusion-core service_data_dir);
+    # legacy: FUSION_PROJECT_HOME (kept for start.sh backup + deployments).
+    legacy = os.environ.get("FUSION_PROJECT_HOME", "")
+    fallback = Path(legacy) if legacy else Path.home() / ".fusion-projects"
+    fc = _fc_config()
+    if fc is not None:
+        return Path(fc.service_data_dir("project", fallback))
+    return fallback
+
+
 SOCKET_PATH = os.environ.get("FUSION_PROJECT_SOCK", "/tmp/fusion-project-svc.sock")
 SOCKET_MODE = int(os.environ.get("FUSION_PROJECT_SOCK_MODE", "0o600"), 8)
 REST_HOST = os.environ.get("FUSION_PROJECT_HOST", "127.0.0.1")
-REST_PORT = int(os.environ.get("FUSION_PROJECT_PORT", "11440"))
+REST_PORT = _rest_port()
 
 
 def rest_host_is_loopback() -> bool:
     host = REST_HOST.strip().lower()
     return host in ("127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1", "[::1]")
 
-BASE_DIR = Path(os.environ.get("FUSION_PROJECT_HOME", str(Path.home() / ".fusion-projects")))
+BASE_DIR = _base_dir()
 DATA_DIR = BASE_DIR / "data"
 STORAGE_DIR = BASE_DIR / "storage"
 DB_PATH = DATA_DIR / "projects.db"
@@ -24,7 +78,7 @@ LOG_DIR = BASE_DIR / "logs"
 RAG_BASE_URL = os.environ.get("FUSION_RAG_URL", "http://127.0.0.1:11436")
 RAG_EMBEDDING_MODEL = os.environ.get("FUSION_RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
 AGENT_STUDIO_URL = os.environ.get("FUSION_AGENT_STUDIO_URL", "http://127.0.0.1:11442")
-GATEWAY_URL = os.environ.get("FUSION_GATEWAY_URL", "http://127.0.0.1:11432")
+GATEWAY_URL = _gateway_url()
 ARTIFACTS_URL = os.environ.get("FUSION_ARTIFACTS_URL", "http://127.0.0.1:8892")
 CHAT_HISTORY_LIMIT = int(os.environ.get("FUSION_CHAT_HISTORY_LIMIT", "50"))
 
@@ -59,10 +113,7 @@ REST_API_KEY = (
     or _read_secret_file(SECRET_FILE)
 )
 REST_ALLOW_NO_AUTH = os.environ.get("FUSION_REST_ALLOW_NO_AUTH", "") != ""
-GATEWAY_API_KEY = (
-    os.environ.get("FUSION_GATEWAY_API_KEY", "")
-    or os.environ.get("FUSION_MLX_API_KEY", "")
-)
+GATEWAY_API_KEY = _gateway_api_key()
 
 REST_MAX_BODY_BYTES = int(os.environ.get("FUSION_REST_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 REST_RATE_LIMIT = int(os.environ.get("FUSION_REST_RATE_LIMIT", "60"))

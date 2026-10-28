@@ -1059,7 +1059,9 @@ async def run_daemon(sock_path: Optional[str] = None) -> None:
 
 def main() -> None:
     from project_service.logging_config import setup_logging
+    from project_service.proc_title import set_process_title
 
+    set_process_title("fusion-projects daemon")
     setup_logging(config.LOG_DIR / "stdout.log")
     try:
         asyncio.run(run_daemon())
