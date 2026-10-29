@@ -335,6 +335,14 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.7.5 — start.sh 无终端拉起 + 端口注册自检（#35 #36）
+关闭 #35 与 #36。两处 `start.sh` 修复：
+
+1. **无终端环境安全拉起（#35）**：`do_start` 原用 `nohup`，在无 TTY 环境（supervisor / CI / launchd）下直接报错 "can't detach from console: Inappropriate ioctl for device"，daemon 根本没被拉起。改为纯重定向脱离（`$ENTRY >> boot.log 2>&1 </dev/null &`），交互与无终端环境均可用。pid/stop/status/drain 逻辑不变。
+2. **先注册后启动自检（#36）**（config Phase 3.3）：新增 `_registry_check()`，服务端口（`FUSION_PROJECT_PORT`，默认 11440）未在 `architecture/port-registry.yaml` 注册时拒绝启动 —— 配置漂移在启动时即失败，而不是等到 CI `check-ports` 才暴露。`FUSION_REGISTRY` 可覆盖注册表路径；`FUSION_SKIP_REGISTRY_CHECK=1` 跳过（独立部署）；注册表文件缺失则警告并继续。dispatch 块加 `BASH_SOURCE` 守卫，测试可直接 source 脚本。
+
+离线套件：**206 通过，0 失败**（新增 7 个测试于 `tests/test_start_sh_checks.py`，覆盖两处修复）。
+
 ### v0.7.4 — 进程标题 + fusion-core 配置迁移（#33 #34）
 关闭 #33 与 #34。落地两处修复：
 

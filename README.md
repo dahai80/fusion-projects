@@ -590,6 +590,27 @@ this service:
 
 ## Changelog
 
+### v0.7.5 — start.sh headless detach + port-registry self-check (#35 #36)
+Closes #35 and #36. Two `start.sh` fixes:
+
+1. **Headless-safe detach (#35)**: `do_start` used `nohup`, which fails
+   outright in TTY-less environments ("can't detach from console:
+   Inappropriate ioctl for device") — the daemon was never spawned under
+   supervisors / CI / launchd. Replaced with redirect-only detach
+   (`$ENTRY >> boot.log 2>&1 </dev/null &`), which works both interactively
+   and headless. pid/stop/status/drain logic unchanged.
+2. **Register-then-start self-check (#36)** (config Phase 3.3): new
+   `_registry_check()` refuses to start when the service port
+   (`FUSION_PROJECT_PORT`, default 11440) is not registered in
+   `architecture/port-registry.yaml` — config drift now fails at boot instead
+   of later in CI `check-ports`. `FUSION_REGISTRY` overrides the registry
+   path; `FUSION_SKIP_REGISTRY_CHECK=1` bypasses (standalone deploys); a
+   missing registry file warns and continues. The dispatch block is guarded
+   by `BASH_SOURCE` so tests can source the script.
+
+Offline suite: **206 passed, 0 failed** (+7 new tests in
+`tests/test_start_sh_checks.py` covering both fixes).
+
 ### v0.7.4 — Process title + fusion-core config migration (#33 #34)
 Closes #33 and #34. Two fixes landed:
 

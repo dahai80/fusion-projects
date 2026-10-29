@@ -14,12 +14,38 @@ LOG_DIR="$SCRIPT_DIR/logs"
 BOOT_LOG="$LOG_DIR/boot.log"
 ENTRY="python3 -m project_service.daemon_server"
 SOCK_PATH="${FUSION_PROJECT_SOCK:-/tmp/fusion-project-svc.sock}"
+# the service's registered business port (REST). the UDS daemon itself does
+# not bind it, but an operator overriding FUSION_PROJECT_PORT to an
+# unregistered value must fail at start, not later in CI check-ports.
+SERVICE="fusion-projects"
+SERVICE_PORT="${FUSION_PROJECT_PORT:-11440}"
 
 # 上游 fusion-agent-studio 的 HTTP api_server 端口（issue#100 修复后 daemon 在 11442 起 FastAPI）。
 # 默认与 agent-studio 对齐；如需覆盖导出 FUSION_AGENT_STUDIO_URL 即可。
 export FUSION_AGENT_STUDIO_URL="${FUSION_AGENT_STUDIO_URL:-http://127.0.0.1:11442}"
 
 mkdir -p "$LOG_DIR"
+
+# issue #36 (config Phase 3.3): register-then-start self-check. refuse to
+# start on an unregistered port so a config drift fails at boot instead of
+# being caught later by CI check-ports. FUSION_SKIP_REGISTRY_CHECK=1 bypasses
+# (standalone deploys); a missing registry file warns + continues.
+_registry_check() {
+    local registry="${FUSION_REGISTRY:-$HOME/fusion/architecture/port-registry.yaml}"
+    if [ ! -f "$registry" ]; then
+        echo "warn: port-registry.yaml not found at $registry — registry self-check skipped" >&2
+        return 0
+    fi
+    if grep -A3 "^  ${SERVICE}:" "$registry" 2>/dev/null | grep -q "port: ${SERVICE_PORT}$"; then
+        return 0
+    fi
+    if [ "${FUSION_SKIP_REGISTRY_CHECK:-}" = "1" ]; then
+        echo "warn: registry check bypassed (FUSION_SKIP_REGISTRY_CHECK=1)" >&2
+        return 0
+    fi
+    echo "port ${SERVICE_PORT} for ${SERVICE} not registered in $registry — refusing to start" >&2
+    return 1
+}
 
 # process-identity check: a live PID is ours only if its cmdline still
 # references the daemon entry. prevents stale-PID reuse → false "already running".
@@ -50,6 +76,8 @@ do_start() {
         echo "fusion-project-svc already running (pid $(cat "$PID_FILE"))"
         return 0
     fi
+    # issue #36: fail fast on an unregistered port before touching any state.
+    _registry_check || return 1
     # stale PID file left by a crashed/killed instance: clear it so we don't
     # mistake a reused PID for our daemon.
     rm -f "$PID_FILE"
@@ -64,7 +92,11 @@ do_start() {
         return 1
     fi
     rm -f "$SOCK_PATH"
-    nohup $ENTRY >> "$BOOT_LOG" 2>&1 &
+    # issue #35: redirect-only detach. nohup fails outright in TTY-less
+    # environments ("can't detach from console: Inappropriate ioctl for
+    # device") and the daemon is never spawned; plain redirects + </dev/null
+    # work both interactively and under a supervisor / CI / launchd.
+    $ENTRY >> "$BOOT_LOG" 2>&1 </dev/null &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     sleep 1
@@ -162,11 +194,15 @@ do_backup() {
     echo "backup complete: $dest ($size)"
 }
 
-case "${1:-status}" in
-    start)   do_start ;;
-    stop)    do_stop ;;
-    restart) do_stop; do_start ;;
-    status)  do_status ;;
-    backup)  do_backup "$@" ;;
-    *) echo "Usage: $0 {start|stop|restart|status|backup [dest_dir]}" >&2; exit 1 ;;
-esac
+# dispatch only when executed directly; sourcing (tests) exposes the
+# functions above without side effects beyond cd + LOG_DIR mkdir.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    case "${1:-status}" in
+        start)   do_start ;;
+        stop)    do_stop ;;
+        restart) do_stop; do_start ;;
+        status)  do_status ;;
+        backup)  do_backup "$@" ;;
+        *) echo "Usage: $0 {start|stop|restart|status|backup [dest_dir]}" >&2; exit 1 ;;
+    esac
+fi
