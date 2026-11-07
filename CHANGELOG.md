@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.5
+version: 0.7.6
 updated: 2026-11-07
 owner: @dahai
 source_of_truth:
@@ -19,6 +19,8 @@ source_of_truth:
 All notable changes to fusion-projects are documented here.
 
 ## Unreleased
+
+## 0.7.6 — 2026-11-07
 
 ### Docs
 

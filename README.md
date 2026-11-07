@@ -606,6 +606,15 @@ this service:
 
 ## Changelog
 
+### v0.7.6 — Docs-system v1.1 adoption (PR #37)
+Docs-only release. Adopts the fusion docs-system v1.1 contract (app x service):
+new `docs/` tree (`product-page`, `get-started`, `api-reference`,
+`config-reference`, `troubleshooting`), 12-key frontmatter on all in-scope
+markdown, `ci/validate_docs.py` contract validator (0 errors / 0 warnings) +
+`.github/workflows/docs.yml` CI. New top-level `CHANGELOG.md` (source of truth
+for version history; README changelog kept in sync). No code changes; 206
+offline tests green on the merged master.
+
 ### v0.7.5 — start.sh headless detach + port-registry self-check (#35 #36)
 Closes #35 and #36. Two `start.sh` fixes:
 
