@@ -1,3 +1,19 @@
+---
+doc_id: fusion-projects/readme
+product: fusion-projects
+class: app
+entry: service
+doc_type: readme
+title: { zh: "fusion-projects 项目资产容器服务（中文）", en: "fusion-projects project asset container service (Chinese)" }
+audience: engineer
+status: draft
+version: 0.7.5
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README_CN.md
+---
+
 # fusion-project-svc
 
 [English](README.md) | **中文**
