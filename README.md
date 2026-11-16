@@ -606,6 +606,15 @@ this service:
 
 ## Changelog
 
+### v0.7.7 — CI retrofit per fusion#2 checklist (#38, PR #39)
+CI-only release. `concurrency` (`cancel-in-progress: true`) grouped by ref on
+both `ci.yml` and `docs.yml` — superseded runs on the same ref cancel instead
+of queueing. pip dependency cache (`setup-python` `cache: pip`) keyed on
+`pyproject.toml` manifest hash in the test and build jobs. Test sharding and a
+nightly tiered gate were assessed and are not warranted: the full offline
+suite runs in ~50s wall time, so per-PR CI already is the fast gate. Run
+minutes before/after recorded in PR #39. No code changes.
+
 ### v0.7.6 — Docs-system v1.1 adoption (PR #37)
 Docs-only release. Adopts the fusion docs-system v1.1 contract (app x service):
 new `docs/` tree (`product-page`, `get-started`, `api-reference`,

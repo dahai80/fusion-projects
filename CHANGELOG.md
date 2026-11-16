@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.6
+version: 0.7.7
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:
@@ -19,6 +19,12 @@ source_of_truth:
 All notable changes to fusion-projects are documented here.
 
 ## Unreleased
+
+## 0.7.7 — 2026-11-16
+
+### CI
+
+- Retrofit per fusion#2 checklist (closes #38, PR #39): `concurrency` + `cancel-in-progress` grouped by ref on `ci.yml` and `docs.yml`; pip dependency cache (`setup-python` `cache: pip`) keyed on `pyproject.toml` in test and build jobs. Sharding and nightly tiered gate assessed as not warranted (~50s suite wall time).
 
 ## 0.7.6 — 2026-11-07
 

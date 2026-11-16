@@ -351,6 +351,9 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.7.7 — CI 按 fusion#2 清单改造（#38，PR #39）
+纯 CI 版本。`ci.yml` 与 `docs.yml` 均加 `concurrency`（`cancel-in-progress: true`，按 ref 分组）—— 同 ref 的旧运行直接取消而不是排队。test 与 build 两个 job 加 pip 依赖缓存（`setup-python` `cache: pip`，按 `pyproject.toml` 清单哈希键控）。测试分片与 nightly 分层门禁经评估不采纳：离线全套约 50 秒跑完，per-PR CI 本身就是快门禁。before/after 运行时长记录在 PR #39。无代码改动。
+
 ### v0.7.6 — 文档体系 v1.1 落地（PR #37）
 纯文档版本。采用 fusion docs-system v1.1 契约（app x service）：新增 `docs/` 目录（`product-page`、`get-started`、`api-reference`、`config-reference`、`troubleshooting`），范围内 markdown 全部加 12 键 frontmatter，新增 `ci/validate_docs.py` 契约校验器（0 error / 0 warn）与 `.github/workflows/docs.yml` CI。新增顶层 `CHANGELOG.md`（版本历史 source of truth；README 变更日志保持同步）。无代码改动；合并后 master 上 206 离线测试全绿。
 
