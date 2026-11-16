@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [master]
 
+# issue #38 (fusion#2 CI retrofit): one run per ref — a new push to the same
+# branch cancels the superseded run instead of queueing it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -25,6 +31,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          # issue #38: pip wheel cache keyed on the package manifest hash —
+          # skips re-downloading pytest/fastapi/etc. when deps unchanged.
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - name: Install fusion-core sibling
         run: pip install -e ./fusion-core
       - name: Install package with test extras
@@ -47,6 +57,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: pip install build
       - run: python -m build
       - uses: actions/upload-artifact@v4
