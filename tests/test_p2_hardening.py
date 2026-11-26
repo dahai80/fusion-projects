@@ -10,11 +10,10 @@ from project_service.daemon_server import ProjectRPCServer
 from project_service.engine.chat_manager import ChatManager
 from project_service.engine.gateway_client import GatewayClient
 from project_service.engine.instruction_engine import InstructionEngine
-from project_service.engine.knowledge_manager import KnowledgeManager, KnowledgeQuotaExceeded
+from project_service.engine.knowledge_manager import KnowledgeManager
 from project_service.engine.project_manager import ProjectManager
 from project_service.store.file_store import FileStore
 from project_service.store.project_store import ProjectStore
-
 
 # ── E5: rate limiter X-Forwarded-For + IP cap eviction ──
 
@@ -63,8 +62,10 @@ async def test_rate_limiter_evicts_at_ip_cap(monkeypatch):
 
 
 def test_rate_key_uses_tenant_when_context_present(monkeypatch):
+    from fusion_core.tenant.context import TenantContext, set_context
+    from fusion_core.tenant.context import reset as reset_ctx
+
     from project_service.api import security
-    from fusion_core.tenant.context import TenantContext, set_context, reset as reset_ctx
 
     ctx = TenantContext(tenant_id="tenant-42", user_id="u1")
     token = set_context(ctx)
@@ -118,8 +119,10 @@ def test_json_formatter_emits_tenant(monkeypatch, tmp_path):
     import io
     import logging
 
+    from fusion_core.tenant.context import TenantContext, set_context
+    from fusion_core.tenant.context import reset as reset_ctx
+
     from project_service.logging_config import _JsonFormatter
-    from fusion_core.tenant.context import TenantContext, set_context, reset as reset_ctx
 
     buf = io.StringIO()
     h = logging.StreamHandler(buf)
@@ -252,7 +255,8 @@ async def test_export_stream_chunks(rpc, monkeypatch):
     assert export_id is not None
     assert chunks_seen >= 1
     # reassemble is a valid zip
-    import zipfile, io
+    import io
+    import zipfile
     with zipfile.ZipFile(io.BytesIO(bytes(collected))) as zf:
         assert "project.json" in zf.namelist()
 
@@ -316,8 +320,8 @@ def test_gateway_client_per_upstream_clients():
 
 @pytest.mark.asyncio
 async def test_index_folder_concurrent(tmp_path):
-    from project_service.models.project import ProjectCreate
     from project_service.engine.rag_coordinator import RAGCoordinator
+    from project_service.models.project import ProjectCreate
     store = ProjectStore(db_path=tmp_path / "projects.db")
     fs = FileStore(storage_dir=tmp_path / "storage")
     pm = ProjectManager(store=store, file_store=fs)
@@ -350,8 +354,8 @@ async def test_index_folder_concurrent(tmp_path):
 
 @pytest.mark.asyncio
 async def test_index_folder_kb_lock_no_duplicate_create(tmp_path):
-    from project_service.models.project import ProjectCreate
     from project_service.engine.rag_coordinator import RAGCoordinator
+    from project_service.models.project import ProjectCreate
     store = ProjectStore(db_path=tmp_path / "projects.db")
     fs = FileStore(storage_dir=tmp_path / "storage")
     pm = ProjectManager(store=store, file_store=fs)

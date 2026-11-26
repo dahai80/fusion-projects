@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -9,7 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 from project_service import config
 from project_service.engine.agent_binder import AgentBinder, AgentBinderError
 from project_service.engine.chat_manager import ChatError, ChatManager, ChatNotFound
-from project_service.engine.gateway_client import GatewayClient, GatewayError
+from project_service.engine.gateway_client import GatewayClient
 from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
@@ -21,12 +20,12 @@ from project_service.engine.knowledge_manager import (
 from project_service.engine.project_manager import (
     ArtifactAlreadyMigrated,
     ArtifactNotFound,
+    ProjectManager,
     ProjectNotArchived,
     ProjectNotFound,
-    ProjectManager,
 )
 from project_service.engine.rag_coordinator import RAGCoordinator, RAGError
-from project_service.store.project_store import FolderError
+from project_service.mcp_server import MCPServer
 from project_service.models.agent_binding import (
     AgentBinding,
     PromptMergeMode,
@@ -57,13 +56,13 @@ from project_service.models.knowledge import (
     KnowledgeFile,
     KnowledgeFolder,
 )
-from project_service.mcp_server import MCPServer
 from project_service.models.project import (
     Project,
     ProjectCreate,
     ProjectListItem,
     ProjectUpdate,
 )
+from project_service.store.project_store import FolderError
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +104,7 @@ def get_gateway_client(request: Request) -> GatewayClient:
 async def list_projects(
     include_archived: bool = False,
     only_starred: bool = False,
-    limit: Optional[int] = 50,
+    limit: int | None = 50,
     offset: int = 0,
     pm: ProjectManager = Depends(get_project_manager),
 ):
@@ -133,7 +132,7 @@ async def get_project(
     try:
         return await pm.get(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.patch("/projects/{project_id}", response_model=Project)
@@ -145,7 +144,7 @@ async def update_project(
     try:
         return await pm.update(project_id, payload)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post("/projects/{project_id}/archive", response_model=Project)
@@ -156,7 +155,7 @@ async def archive_project(
     try:
         return await pm.archive(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post("/projects/{project_id}/unarchive", response_model=Project)
@@ -167,7 +166,7 @@ async def unarchive_project(
     try:
         return await pm.unarchive(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post("/projects/{project_id}/star", response_model=Project)
@@ -179,7 +178,7 @@ async def star_project(
     try:
         return await pm.star(project_id, starred)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.delete("/projects/{project_id}", status_code=204)
@@ -190,21 +189,21 @@ async def delete_project(
     try:
         await pm.delete(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
     except ProjectNotArchived as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.post("/projects/{project_id}/duplicate", response_model=Project, status_code=201)
 async def duplicate_project(
     project_id: str,
-    name: Optional[str] = None,
+    name: str | None = None,
     pm: ProjectManager = Depends(get_project_manager),
 ):
     try:
         return await pm.duplicate_project(project_id, name=name)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 # ── Instruction endpoints ──
@@ -218,7 +217,7 @@ async def get_instructions(
     try:
         return await ie.get(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.put("/projects/{project_id}/instructions", response_model=InstructionContent)
@@ -230,7 +229,7 @@ async def save_instructions(
     try:
         return await ie.save(project_id, payload)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.delete("/projects/{project_id}/instructions", status_code=204)
@@ -241,7 +240,7 @@ async def clear_instructions(
     try:
         await ie.clear(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.get(
@@ -255,7 +254,7 @@ async def list_instruction_snapshots(
     try:
         return await ie.list_snapshots(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post(
@@ -270,7 +269,7 @@ async def restore_instruction_snapshot(
     try:
         return await ie.restore_snapshot(snapshot_id)
     except SnapshotNotFound:
-        raise HTTPException(status_code=404, detail="snapshot not found")
+        raise HTTPException(status_code=404, detail="snapshot not found") from None
 
 
 @router.delete(
@@ -285,7 +284,7 @@ async def delete_instruction_snapshot(
     try:
         await ie.delete_snapshot(snapshot_id)
     except SnapshotNotFound:
-        raise HTTPException(status_code=404, detail="snapshot not found")
+        raise HTTPException(status_code=404, detail="snapshot not found") from None
 
 
 # ── Artifact endpoints ──
@@ -294,9 +293,9 @@ async def delete_instruction_snapshot(
 @router.get("/projects/{project_id}/artifacts", response_model=list[ArtifactRef])
 async def list_project_artifacts(
     project_id: str,
-    type: Optional[str] = None,
-    kind: Optional[str] = None,
-    search: Optional[str] = None,
+    type: str | None = None,
+    kind: str | None = None,
+    search: str | None = None,
     pm: ProjectManager = Depends(get_project_manager),
 ):
     try:
@@ -307,7 +306,7 @@ async def list_project_artifacts(
             search=search,
         )
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post("/projects/{project_id}/artifacts", response_model=ArtifactRef, status_code=201)
@@ -319,9 +318,9 @@ async def migrate_artifact(
     try:
         return await pm.migrate_artifact(project_id, payload.artifact_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
     except ArtifactAlreadyMigrated as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.delete("/projects/{project_id}/artifacts/{artifact_id}", status_code=204)
@@ -333,13 +332,13 @@ async def remove_project_artifact(
     try:
         await pm.remove_artifact(artifact_id)
     except ArtifactNotFound:
-        raise HTTPException(status_code=404, detail="artifact not found")
+        raise HTTPException(status_code=404, detail="artifact not found") from None
 
 
 @router.post("/projects/{project_id}/artifacts/export")
 async def export_project_artifacts(
     project_id: str,
-    artifact_ids: Optional[list[str]] = None,
+    artifact_ids: list[str] | None = None,
     pm: ProjectManager = Depends(get_project_manager),
 ):
     try:
@@ -350,9 +349,9 @@ async def export_project_artifacts(
             headers={"Content-Disposition": f"attachment; filename=project_{project_id}_artifacts.zip"},
         )
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
     except ArtifactNotFound:
-        raise HTTPException(status_code=404, detail="no artifacts to export")
+        raise HTTPException(status_code=404, detail="no artifacts to export") from None
 
 
 @router.post("/projects/{project_id}/export")
@@ -368,7 +367,7 @@ async def export_project(
             headers={"Content-Disposition": f"attachment; filename=project_{project_id}_full.zip"},
         )
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 # ── Chat endpoints ──
@@ -383,7 +382,7 @@ async def list_chats(
     try:
         return await cm.list_chats(project_id, only_starred=only_starred)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post("/projects/{project_id}/chats", response_model=Chat, status_code=201)
@@ -395,7 +394,7 @@ async def create_chat(
     try:
         return await cm.create_chat(project_id, payload)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.get("/projects/{project_id}/chats/{chat_id}", response_model=Chat)
@@ -407,7 +406,7 @@ async def get_chat(
     try:
         return await cm.get_chat(chat_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.patch("/projects/{project_id}/chats/{chat_id}", response_model=Chat)
@@ -421,7 +420,7 @@ async def update_chat(
         fields = payload.model_dump(exclude_unset=True)
         return await cm.update_chat(chat_id, fields, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.post("/projects/{project_id}/chats/{chat_id}/star", response_model=Chat)
@@ -434,7 +433,7 @@ async def star_chat(
     try:
         return await cm.star_chat(chat_id, starred, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.delete("/projects/{project_id}/chats/{chat_id}", status_code=204)
@@ -446,21 +445,21 @@ async def delete_chat(
     try:
         await cm.delete_chat(chat_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.post("/projects/{project_id}/chats/{chat_id}/fork", response_model=Chat, status_code=201)
 async def fork_chat(
     project_id: str,
     chat_id: str,
-    payload: Optional[ChatForkRequest] = None,
+    payload: ChatForkRequest | None = None,
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
         label = payload.label if payload else None
         return await cm.fork_chat(chat_id, label=label, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.post("/projects/{project_id}/chats/{chat_id}/move", response_model=Chat)
@@ -473,9 +472,9 @@ async def move_chat(
     try:
         return await cm.move_chat(chat_id, payload.target_project_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="target project not found")
+        raise HTTPException(status_code=404, detail="target project not found") from None
 
 
 @router.post("/projects/{project_id}/chats/{chat_id}/detach", response_model=Chat)
@@ -487,7 +486,7 @@ async def detach_chat(
     try:
         return await cm.detach_chat(chat_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 # ── Chat snapshot endpoints ──
@@ -502,7 +501,7 @@ async def create_chat_snapshot(
     try:
         return await cm.create_snapshot(chat_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.get("/projects/{project_id}/chats/{chat_id}/snapshots", response_model=list[ChatSnapshot])
@@ -514,7 +513,7 @@ async def list_chat_snapshots(
     try:
         return await cm.list_snapshots(chat_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.post("/projects/{project_id}/chats/{chat_id}/snapshots/{snapshot_id}/restore", response_model=Chat)
@@ -527,7 +526,7 @@ async def restore_chat_snapshot(
     try:
         return await cm.restore_snapshot(snapshot_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="snapshot not found")
+        raise HTTPException(status_code=404, detail="snapshot not found") from None
 
 
 @router.delete("/projects/{project_id}/chats/{chat_id}/snapshots/{snapshot_id}", status_code=204)
@@ -540,7 +539,7 @@ async def delete_chat_snapshot(
     try:
         await cm.delete_snapshot(snapshot_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="snapshot not found")
+        raise HTTPException(status_code=404, detail="snapshot not found") from None
 
 
 # ── Message endpoints ──
@@ -557,7 +556,7 @@ async def list_messages(
     try:
         return await cm.list_messages(chat_id, limit=limit, offset=offset, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.post("/projects/{project_id}/chats/{chat_id}/messages", response_model=Message, status_code=201)
@@ -570,7 +569,7 @@ async def add_message(
     try:
         return await cm.add_message(chat_id, payload, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.delete("/projects/{project_id}/chats/{chat_id}/messages/{message_id}", status_code=204)
@@ -583,7 +582,7 @@ async def delete_message(
     try:
         await cm.delete_message(message_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="message not found")
+        raise HTTPException(status_code=404, detail="message not found") from None
 
 
 def _format_rag_context(items: list[dict]) -> str:
@@ -685,7 +684,7 @@ async def stream_message(
                         chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=2.0)
                     except StopAsyncIteration:
                         break
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         if await request.is_disconnected():
                             logger.info("sse client disconnected chat=%s, cancelling upstream", chat_id)
                             disconnected = True
@@ -740,7 +739,7 @@ async def stream_message(
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 # ── Temp attachment endpoints ──
@@ -757,7 +756,7 @@ async def add_temp_attachment(
     file_path: str,
     original_name: str,
     file_size: int = 0,
-    mime_type: Optional[str] = None,
+    mime_type: str | None = None,
     cm: ChatManager = Depends(get_chat_manager),
 ):
     try:
@@ -766,11 +765,11 @@ async def add_temp_attachment(
             file_size=file_size, mime_type=mime_type, project_id=project_id,
         )
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
     except ChatError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except KnowledgeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get(
@@ -785,7 +784,7 @@ async def list_temp_attachments(
     try:
         return await cm.list_temp_attachments(chat_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="chat not found")
+        raise HTTPException(status_code=404, detail="chat not found") from None
 
 
 @router.delete(
@@ -801,7 +800,7 @@ async def delete_temp_attachment(
     try:
         await cm.delete_temp_attachment(attachment_id, project_id=project_id)
     except ChatNotFound:
-        raise HTTPException(status_code=404, detail="temp attachment not found")
+        raise HTTPException(status_code=404, detail="temp attachment not found") from None
 
 
 # ── Knowledge folder endpoints ──
@@ -810,13 +809,13 @@ async def delete_temp_attachment(
 @router.get("/projects/{project_id}/knowledge/folders", response_model=list[KnowledgeFolder])
 async def list_folders(
     project_id: str,
-    parent_id: Optional[str] = None,
+    parent_id: str | None = None,
     km: KnowledgeManager = Depends(get_knowledge_manager),
 ):
     try:
         return await km.list_folders(project_id, parent_id=parent_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post("/projects/{project_id}/knowledge/folders", response_model=KnowledgeFolder, status_code=201)
@@ -828,9 +827,9 @@ async def create_folder(
     try:
         return await km.create_folder(project_id, payload)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
     except FolderError as e:
-        raise HTTPException(status_code=400, detail="folder error: " + str(e))
+        raise HTTPException(status_code=400, detail="folder error: " + str(e)) from e
 
 
 @router.patch("/projects/{project_id}/knowledge/folders/{folder_id}", response_model=KnowledgeFolder)
@@ -843,9 +842,9 @@ async def update_folder(
     try:
         return await km.update_folder(folder_id, payload)
     except FolderNotFound:
-        raise HTTPException(status_code=404, detail="folder not found")
+        raise HTTPException(status_code=404, detail="folder not found") from None
     except FolderError as e:
-        raise HTTPException(status_code=400, detail="folder error: " + str(e))
+        raise HTTPException(status_code=400, detail="folder error: " + str(e)) from e
 
 
 @router.delete("/projects/{project_id}/knowledge/folders/{folder_id}", status_code=204)
@@ -857,7 +856,7 @@ async def delete_folder(
     try:
         await km.delete_folder(folder_id)
     except FolderNotFound:
-        raise HTTPException(status_code=404, detail="folder not found")
+        raise HTTPException(status_code=404, detail="folder not found") from None
 
 
 # ── Knowledge file endpoints ──
@@ -866,13 +865,13 @@ async def delete_folder(
 @router.get("/projects/{project_id}/knowledge/files", response_model=list[KnowledgeFile])
 async def list_knowledge_files(
     project_id: str,
-    folder_id: Optional[str] = None,
+    folder_id: str | None = None,
     km: KnowledgeManager = Depends(get_knowledge_manager),
 ):
     try:
         return await km.list_files(project_id, folder_id=folder_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.get("/projects/{project_id}/knowledge/files/{file_id}", response_model=KnowledgeFile)
@@ -884,7 +883,7 @@ async def get_knowledge_file(
     try:
         return await km.get_file(file_id)
     except KnowledgeFileNotFound:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found") from None
 
 
 @router.delete("/projects/{project_id}/knowledge/files/{file_id}", status_code=204)
@@ -896,7 +895,7 @@ async def delete_knowledge_file(
     try:
         await km.delete_file(file_id)
     except KnowledgeFileNotFound:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found") from None
 
 
 @router.post("/projects/{project_id}/knowledge/files/upload", response_model=KnowledgeFile, status_code=201)
@@ -904,8 +903,8 @@ async def upload_knowledge_file(
     project_id: str,
     source_path: str,
     original_name: str,
-    folder_id: Optional[str] = None,
-    mime_type: Optional[str] = None,
+    folder_id: str | None = None,
+    mime_type: str | None = None,
     km: KnowledgeManager = Depends(get_knowledge_manager),
 ):
     try:
@@ -914,9 +913,9 @@ async def upload_knowledge_file(
             folder_id=folder_id, mime_type=mime_type,
         )
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
     except KnowledgeQuotaExceeded as e:
-        raise HTTPException(status_code=507, detail=str(e))
+        raise HTTPException(status_code=507, detail=str(e)) from e
 
 
 @router.post("/projects/{project_id}/knowledge/files/{file_id}/replace", response_model=KnowledgeFile)
@@ -929,17 +928,17 @@ async def replace_knowledge_file(
     try:
         return await km.replace_file(file_id, source_path)
     except KnowledgeFileNotFound:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found") from None
     except KnowledgeQuotaExceeded as e:
-        raise HTTPException(status_code=507, detail=str(e))
+        raise HTTPException(status_code=507, detail=str(e)) from e
 
 
 @router.patch("/projects/{project_id}/knowledge/files/{file_id}", response_model=KnowledgeFile)
 async def update_knowledge_file(
     project_id: str,
     file_id: str,
-    name: Optional[str] = None,
-    folder_id: Optional[str] = None,
+    name: str | None = None,
+    folder_id: str | None = None,
     km: KnowledgeManager = Depends(get_knowledge_manager),
 ):
     try:
@@ -949,7 +948,7 @@ async def update_knowledge_file(
             return await km.move_file(file_id, folder_id)
         raise HTTPException(status_code=400, detail="name or folder_id required")
     except KnowledgeFileNotFound:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found") from None
 
 
 @router.get("/projects/{project_id}/knowledge/status", response_model=list[FileIndexStatus])
@@ -960,7 +959,7 @@ async def list_file_statuses(
     try:
         return await km.list_file_statuses(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post("/projects/{project_id}/knowledge/files/{file_id}/always-include", response_model=KnowledgeFile)
@@ -973,7 +972,7 @@ async def set_always_include(
     try:
         return await km.set_always_include(file_id, always_include)
     except KnowledgeFileNotFound:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found") from None
 
 
 # ── Agent binding endpoints ──
@@ -982,57 +981,57 @@ async def set_always_include(
 @router.get("/projects/{project_id}/agent", response_model=AgentBinding)
 async def get_agent_binding(
     project_id: str,
-    chat_id: Optional[str] = None,
+    chat_id: str | None = None,
     ab: AgentBinder = Depends(get_agent_binder),
 ):
     try:
         return await ab.get_binding(project_id, chat_id=chat_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.put("/projects/{project_id}/agent", response_model=AgentBinding)
 async def set_agent_binding(
     project_id: str,
-    agent_id: Optional[str] = None,
-    merge_mode: Optional[PromptMergeMode] = None,
-    chat_id: Optional[str] = None,
+    agent_id: str | None = None,
+    merge_mode: PromptMergeMode | None = None,
+    chat_id: str | None = None,
     ab: AgentBinder = Depends(get_agent_binder),
 ):
     try:
         return await ab.set_binding(project_id, agent_id=agent_id, merge_mode=merge_mode, chat_id=chat_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
     except AgentBinderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.delete("/projects/{project_id}/agent", status_code=204)
 async def remove_agent_binding(
     project_id: str,
-    chat_id: Optional[str] = None,
+    chat_id: str | None = None,
     ab: AgentBinder = Depends(get_agent_binder),
 ):
     try:
         await ab.remove_binding(project_id, chat_id=chat_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
     except AgentBinderError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/projects/{project_id}/system-prompt")
 async def build_system_prompt(
     project_id: str,
-    agent_prompt: Optional[str] = None,
-    chat_id: Optional[str] = None,
+    agent_prompt: str | None = None,
+    chat_id: str | None = None,
     ab: AgentBinder = Depends(get_agent_binder),
 ):
     try:
         prompt = await ab.build_system_prompt(project_id, agent_prompt=agent_prompt, chat_id=chat_id)
         return {"system_prompt": prompt}
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 # ── RAG endpoints ──
@@ -1047,7 +1046,7 @@ async def index_file(
     try:
         return await rc.index_file(file_id)
     except RAGError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/projects/{project_id}/rag/index-folder/{folder_id}")
@@ -1060,18 +1059,18 @@ async def index_folder(
         results = await rc.index_folder(folder_id, project_id=project_id)
         return {"indexed": len(results), "results": results}
     except RAGError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/projects/{project_id}/rag/query")
 async def rag_query(
     project_id: str,
     query: str,
-    mode: Optional[str] = None,
-    folder_ids: Optional[list[str]] = None,
-    top_k: Optional[int] = None,
-    threshold: Optional[float] = None,
-    chat_id: Optional[str] = None,
+    mode: str | None = None,
+    folder_ids: list[str] | None = None,
+    top_k: int | None = None,
+    threshold: float | None = None,
+    chat_id: str | None = None,
     rc: RAGCoordinator = Depends(get_rag_coordinator),
 ):
     try:
@@ -1081,7 +1080,7 @@ async def rag_query(
             threshold=threshold, chat_id=chat_id,
         )
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.delete("/projects/{project_id}/rag/index/{file_id}")
@@ -1093,7 +1092,7 @@ async def remove_file_index(
     try:
         return await rc.remove_file_index(file_id)
     except RAGError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/projects/{project_id}/rag/status")
@@ -1104,7 +1103,7 @@ async def rag_status(
     try:
         return await rc.get_rag_status(project_id)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.get("/projects/{project_id}/rag/config")
@@ -1120,15 +1119,15 @@ async def get_rag_config(
             "rag_threshold": proj.rag_threshold,
         }
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.put("/projects/{project_id}/rag/config")
 async def set_rag_config(
     project_id: str,
-    rag_mode: Optional[str] = None,
-    rag_top_k: Optional[int] = None,
-    rag_threshold: Optional[float] = None,
+    rag_mode: str | None = None,
+    rag_top_k: int | None = None,
+    rag_threshold: float | None = None,
     pm: ProjectManager = Depends(get_project_manager),
 ):
     try:
@@ -1147,7 +1146,7 @@ async def set_rag_config(
             "rag_threshold": proj.rag_threshold,
         }
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 # ── Audit log endpoints ──
@@ -1165,16 +1164,16 @@ async def list_audit_log(
         rows = pm.store.list_audit_log(project_id, limit=limit, offset=offset)
         return [AuditLogEntry.from_row(r) for r in rows]
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 @router.post("/projects/{project_id}/audit", response_model=AuditLogEntry, status_code=201)
 async def create_audit_log(
     project_id: str,
     action: str,
-    chat_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    details: Optional[str] = None,
+    chat_id: str | None = None,
+    agent_id: str | None = None,
+    details: str | None = None,
     pm: ProjectManager = Depends(get_project_manager),
 ):
     try:
@@ -1188,7 +1187,7 @@ async def create_audit_log(
         })
         return AuditLogEntry.from_row(row)
     except ProjectNotFound:
-        raise HTTPException(status_code=404, detail="project not found")
+        raise HTTPException(status_code=404, detail="project not found") from None
 
 
 # ── MCP endpoint ──

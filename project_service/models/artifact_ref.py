@@ -1,4 +1,3 @@
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -13,10 +12,10 @@ class ArtifactRef(BaseModel):
     artifact_id: str
     artifact_name: str
     artifact_type: str
-    artifact_kind: Optional[str] = None
-    content_summary: Optional[str] = None
+    artifact_kind: str | None = None
+    content_summary: str | None = None
     migrated_at: str
-    source_session_id: Optional[str] = None
+    source_session_id: str | None = None
 
     @classmethod
     def from_row(cls, row: dict) -> "ArtifactRef":

@@ -1,7 +1,6 @@
 import asyncio
 import os
 import statistics
-import tempfile
 import time
 
 import pytest
@@ -35,13 +34,12 @@ async def test_concurrent_store_writes_do_not_block_event_loop(tmp_path):
     # runs. if to_thread is correct, the tick keeps a steady cadence (loop not
     # blocked by sync sqlite). if any store call ran sync on the loop, the tick
     # would stall — gap >> median gap exposes it.
-    from project_service import config
-    from project_service.store.project_store import ProjectStore
-    from project_service.store.file_store import FileStore
-    from project_service.engine.project_manager import ProjectManager
+    from project_service.daemon_server import ProjectRPCServer
     from project_service.engine.chat_manager import ChatManager
     from project_service.engine.gateway_client import GatewayClient
-    from project_service.daemon_server import ProjectRPCServer
+    from project_service.engine.project_manager import ProjectManager
+    from project_service.store.file_store import FileStore
+    from project_service.store.project_store import ProjectStore
 
     store = ProjectStore(db_path=os.path.join(str(tmp_path), "stress.db"))
     fs = FileStore(storage_dir=os.path.join(str(tmp_path), "storage"))
@@ -113,10 +111,10 @@ async def test_concurrent_rag_queries_across_projects(tmp_path):
     # so distinct projects proceed in parallel. measure wall-clock vs sum-of-
     # per-call to detect serialization.
     from project_service import config
-    from project_service.store.project_store import ProjectStore
+    from project_service.engine.gateway_client import GatewayClient
     from project_service.engine.project_manager import ProjectManager
     from project_service.engine.rag_coordinator import RAGCoordinator
-    from project_service.engine.gateway_client import GatewayClient
+    from project_service.store.project_store import ProjectStore
 
     config.RAG_BASE_URL = os.environ.get("FUSION_RAG_URL", "http://127.0.0.1:11436")
     config.RAG_EMBEDDING_MODEL = os.environ.get("FUSION_RAG_EMBEDDING_MODEL", "BGE-M3")
@@ -136,7 +134,7 @@ async def test_concurrent_rag_queries_across_projects(tmp_path):
         t = time.monotonic()
         try:
             await rc.query(pid, "test query", top_k=3)
-        except Exception as e:
+        except Exception:
             # upstream may reject; we care about timing not result correctness
             pass
         return time.monotonic() - t

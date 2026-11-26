@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
@@ -9,12 +8,12 @@ from fastapi.responses import JSONResponse
 
 from project_service import config
 from project_service.api.routes import router
-from project_service.daemon_server import ProjectRPCServer
 from project_service.api.security import (
     AuthMiddleware,
     BodySizeMiddleware,
     RateLimitMiddleware,
 )
+from project_service.daemon_server import ProjectRPCServer
 from project_service.engine.agent_binder import AgentBinder
 from project_service.engine.chat_manager import ChatManager
 from project_service.engine.gateway_client import GatewayClient
@@ -29,12 +28,12 @@ logger = logging.getLogger(__name__)
 
 
 def create_app(
-    project_manager: Optional[ProjectManager] = None,
-    instruction_engine: Optional[InstructionEngine] = None,
-    chat_manager: Optional[ChatManager] = None,
-    knowledge_manager: Optional[KnowledgeManager] = None,
-    agent_binder: Optional[AgentBinder] = None,
-    rag_coordinator: Optional[RAGCoordinator] = None,
+    project_manager: ProjectManager | None = None,
+    instruction_engine: InstructionEngine | None = None,
+    chat_manager: ChatManager | None = None,
+    knowledge_manager: KnowledgeManager | None = None,
+    agent_binder: AgentBinder | None = None,
+    rag_coordinator: RAGCoordinator | None = None,
 ) -> FastAPI:
     gateway_client = GatewayClient()
 
@@ -45,9 +44,9 @@ def create_app(
         if not auth_on and not config.rest_host_is_loopback() and not config.REST_ALLOW_NO_AUTH:
             msg = (
                 "REFUSING to start: REST auth disabled (no FUSION_REST_API_KEY) and "
-                "bound to non-loopback host %s. Set FUSION_REST_API_KEY, or bind to "
+                f"bound to non-loopback host {config.REST_HOST}. Set FUSION_REST_API_KEY, or bind to "
                 "127.0.0.1, or set FUSION_REST_ALLOW_NO_AUTH=1 to acknowledge."
-            ) % config.REST_HOST
+            )
             logger.critical(msg)
             raise RuntimeError(msg)
         yield
@@ -130,9 +129,9 @@ def create_app(
             # abort startup so operator notices instead of serving cross-tenant.
             msg = (
                 "REFUSING to start: FUSION_IDENTITY_SERVICE_TOKEN set but "
-                "TenantMiddleware install failed: %s. Fix fusion-core/identity "
+                f"TenantMiddleware install failed: {e}. Fix fusion-core/identity "
                 "config; do not degrade to global-key auth (cross-tenant leak)."
-            ) % e
+            )
             logger.critical(msg)
             raise RuntimeError(msg) from e
         logger.info("tenant middleware installed (identity-gated multi-tenant mode)")

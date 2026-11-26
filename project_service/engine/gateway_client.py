@@ -3,7 +3,7 @@ import json
 import logging
 import random
 import time
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -125,15 +125,15 @@ class GatewayClient:
         method: str,
         path: str,
         *,
-        json_data: Optional[dict] = None,
-        params: Optional[dict] = None,
+        json_data: dict | None = None,
+        params: dict | None = None,
         retries: int = _MAX_RETRIES,
     ) -> dict:
         url = f"{base_url}{path}"
         client = self._client_for(base_url)
         up = _upstream_name(base_url)
-        last_exc: Optional[Exception] = None
-        last_status: Optional[int] = None
+        last_exc: Exception | None = None
+        last_status: int | None = None
         retries_done = 0
         t0 = time.monotonic()
         try:
@@ -290,8 +290,8 @@ class GatewayClient:
 
     async def artifacts_call(self, method: str, params: dict) -> dict:
         payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
-        last_exc: Optional[Exception] = None
-        last_status: Optional[int] = None
+        last_exc: Exception | None = None
+        last_status: int | None = None
         retries_done = 0
         t0 = time.monotonic()
         try:
@@ -431,7 +431,7 @@ class GatewayClient:
         metrics.record_identity_verify(ok=True)
         return claims
 
-    async def identity_emit_usage(self, tenant_id: str, metric: str, value: int, *, source: str = "fusion-projects", model: Optional[str] = None, user_id: Optional[str] = None) -> None:
+    async def identity_emit_usage(self, tenant_id: str, metric: str, value: int, *, source: str = "fusion-projects", model: str | None = None, user_id: str | None = None) -> None:
         if not self._identity_service_token:
             return
         url = f"{self._identity_url}/api/v1/tenants/{tenant_id}/usage"

@@ -1,23 +1,22 @@
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
 
 class FolderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    parent_id: Optional[str] = None
+    parent_id: str | None = None
 
 
 class FolderUpdate(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=200)
-    parent_id: Optional[str] = None
+    name: str | None = Field(None, min_length=1, max_length=200)
+    parent_id: str | None = None
 
 
 class KnowledgeFolder(BaseModel):
     id: str
     project_id: str
     name: str
-    parent_id: Optional[str] = None
+    parent_id: str | None = None
     sort_order: int = 0
     created_at: str
 
@@ -36,13 +35,13 @@ class KnowledgeFolder(BaseModel):
 class KnowledgeFile(BaseModel):
     id: str
     project_id: str
-    folder_id: Optional[str] = None
+    folder_id: str | None = None
     name: str
     original_name: str
     file_path: str
     file_size: int = 0
-    mime_type: Optional[str] = None
-    rag_doc_id: Optional[str] = None
+    mime_type: str | None = None
+    rag_doc_id: str | None = None
     index_status: str = "PENDING"
     always_include: bool = False
     created_at: str

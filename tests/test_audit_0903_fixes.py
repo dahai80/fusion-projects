@@ -11,7 +11,6 @@ from project_service.engine.rag_coordinator import RAGCoordinator
 from project_service.store.file_store import FileStore, InvalidProjectId
 from project_service.store.project_store import FolderError, ProjectStore
 
-
 # ── helpers ──
 
 
@@ -231,8 +230,9 @@ async def test_migrate_down_disabled_without_env(tmp_path, monkeypatch):
 async def test_tenant_middleware_install_failure_aborts(monkeypatch):
     # import first so the module-level create_app() call (rest_server.py:189)
     # runs with the default empty token — safe, no tenant path — and is cached.
-    from project_service.api.rest_server import create_app
     import fusion_core.tenant as ft
+
+    from project_service.api.rest_server import create_app
 
     def _boom(*a, **k):
         raise RuntimeError("boom")

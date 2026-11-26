@@ -1,13 +1,12 @@
 import asyncio
 import logging
-from typing import Optional
 
+from project_service.engine.project_manager import ProjectManager
 from project_service.models.instruction import (
     InstructionContent,
     InstructionSave,
     InstructionSnapshot,
 )
-from project_service.engine.project_manager import ProjectManager
 from project_service.store.project_store import ProjectStore
 
 logger = logging.getLogger(__name__)
@@ -20,8 +19,8 @@ class SnapshotNotFound(Exception):
 class InstructionEngine:
     def __init__(
         self,
-        store: Optional[ProjectStore] = None,
-        project_manager: Optional[ProjectManager] = None,
+        store: ProjectStore | None = None,
+        project_manager: ProjectManager | None = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.project_manager = project_manager or ProjectManager(store=self.store)

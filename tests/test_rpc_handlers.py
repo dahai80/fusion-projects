@@ -391,8 +391,8 @@ async def test_project_export(rpc):
     assert "zip_base64" in result
     assert result["size"] > 0
     import base64
-    import zipfile
     import io
+    import zipfile
     zdata = base64.b64decode(result["zip_base64"])
     zf = zipfile.ZipFile(io.BytesIO(zdata))
     names = zf.namelist()

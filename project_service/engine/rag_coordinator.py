@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from project_service import config, metrics
 from project_service.engine.gateway_client import GatewayClient, GatewayError
@@ -23,9 +22,9 @@ class RAGServiceUnavailable(RAGError):
 class RAGCoordinator:
     def __init__(
         self,
-        store: Optional[ProjectStore] = None,
-        project_manager: Optional[ProjectManager] = None,
-        upstream: Optional[GatewayClient] = None,
+        store: ProjectStore | None = None,
+        project_manager: ProjectManager | None = None,
+        upstream: GatewayClient | None = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.project_manager = project_manager or ProjectManager()
@@ -178,7 +177,7 @@ class RAGCoordinator:
         logger.info("rag index complete file=%s doc=%s", file_id, doc_id)
         return result
 
-    async def index_folder(self, folder_id: str, project_id: Optional[str] = None) -> list[dict]:
+    async def index_folder(self, folder_id: str, project_id: str | None = None) -> list[dict]:
         folder = await asyncio.to_thread(self.store.get_folder, folder_id)
         if not folder:
             raise RAGError(f"folder not found: {folder_id}")
@@ -206,11 +205,11 @@ class RAGCoordinator:
         project_id: str,
         query_text: str,
         *,
-        mode: Optional[str] = None,
-        folder_ids: Optional[list[str]] = None,
-        top_k: Optional[int] = None,
-        threshold: Optional[float] = None,
-        chat_id: Optional[str] = None,
+        mode: str | None = None,
+        folder_ids: list[str] | None = None,
+        top_k: int | None = None,
+        threshold: float | None = None,
+        chat_id: str | None = None,
     ) -> dict:
         await self._ensure_project(project_id)
         project = await asyncio.to_thread(self.store.get_project, project_id)
@@ -265,7 +264,7 @@ class RAGCoordinator:
 
         upstream_failures: list[str] = []
 
-        async def _search_one(prefix: Optional[str]) -> list:
+        async def _search_one(prefix: str | None) -> list:
             try:
                 result = await self.upstream.rag_search(
                     kb_id=kb_id, query=query_text, top_k=rag_top_k, folder_prefix=prefix,

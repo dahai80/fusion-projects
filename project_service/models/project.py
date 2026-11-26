@@ -1,4 +1,3 @@
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -8,25 +7,25 @@ from project_service import config
 class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str = ""
-    default_agent_id: Optional[str] = None
+    default_agent_id: str | None = None
     prompt_merge_mode: str = config.DEFAULT_PROMPT_MERGE
     rag_mode: str = config.DEFAULT_RAG_MODE
     rag_top_k: int = Field(config.DEFAULT_RAG_TOP_K, ge=1, le=config.RAG_MAX_TOP_K)
     rag_threshold: float = Field(config.DEFAULT_RAG_THRESHOLD, ge=0.0, le=1.0)
-    kb_id: Optional[str] = None
-    instructions: Optional[str] = None
-    template_id: Optional[str] = None
+    kb_id: str | None = None
+    instructions: str | None = None
+    template_id: str | None = None
 
 
 class ProjectUpdate(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=200)
-    description: Optional[str] = None
-    default_agent_id: Optional[str] = None
-    prompt_merge_mode: Optional[str] = None
-    rag_mode: Optional[str] = None
-    rag_top_k: Optional[int] = Field(None, ge=1, le=config.RAG_MAX_TOP_K)
-    rag_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
-    kb_id: Optional[str] = None
+    name: str | None = Field(None, min_length=1, max_length=200)
+    description: str | None = None
+    default_agent_id: str | None = None
+    prompt_merge_mode: str | None = None
+    rag_mode: str | None = None
+    rag_top_k: int | None = Field(None, ge=1, le=config.RAG_MAX_TOP_K)
+    rag_threshold: float | None = Field(None, ge=0.0, le=1.0)
+    kb_id: str | None = None
 
 
 class Project(BaseModel):
@@ -35,12 +34,12 @@ class Project(BaseModel):
     description: str
     is_archived: bool
     is_starred: bool
-    default_agent_id: Optional[str] = None
+    default_agent_id: str | None = None
     prompt_merge_mode: str
     rag_mode: str
     rag_top_k: int
     rag_threshold: float
-    kb_id: Optional[str] = None
+    kb_id: str | None = None
     tenant_id: str = ""
     artifact_count: int = 0
     created_at: str
@@ -73,7 +72,7 @@ class ProjectListItem(BaseModel):
     description: str
     is_archived: bool
     is_starred: bool
-    default_agent_id: Optional[str] = None
+    default_agent_id: str | None = None
     tenant_id: str = ""
     artifact_count: int = 0
     updated_at: str

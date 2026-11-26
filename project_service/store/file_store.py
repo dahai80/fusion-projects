@@ -3,7 +3,6 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Optional
 
 from project_service import config
 
@@ -25,7 +24,7 @@ class InvalidProjectId(Exception):
 
 
 class FileStore:
-    def __init__(self, storage_dir: Optional[Path] = None) -> None:
+    def __init__(self, storage_dir: Path | None = None) -> None:
         self.storage_dir = (Path(storage_dir) if storage_dir else config.STORAGE_DIR).resolve()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         logger.info("FileStore ready storage=%s", self.storage_dir)

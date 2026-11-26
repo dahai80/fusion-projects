@@ -23,7 +23,6 @@ async def test_rest_startup_refuses_non_loopback_no_auth(monkeypatch):
     monkeypatch.setattr(config, "REST_API_KEY", "")
     monkeypatch.setattr(config, "REST_ALLOW_NO_AUTH", False)
     monkeypatch.setattr(config, "REST_HOST", "0.0.0.0")
-    import project_service.api.rest_server as rs
     with pytest.raises(RuntimeError):
         app = create_app()
         async with app.router.lifespan_context(app):

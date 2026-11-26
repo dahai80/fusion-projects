@@ -8,7 +8,7 @@ import shutil
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from project_service import config
 from project_service.engine.gateway_client import GatewayClient, GatewayError
@@ -63,10 +63,10 @@ class ArtifactNotFound(ProjectError):
 class ProjectManager:
     def __init__(
         self,
-        store: Optional[ProjectStore] = None,
-        file_store: Optional[FileStore] = None,
-        upstream: Optional[GatewayClient] = None,
-        rag_coordinator: Optional["RAGCoordinator"] = None,
+        store: ProjectStore | None = None,
+        file_store: FileStore | None = None,
+        upstream: GatewayClient | None = None,
+        rag_coordinator: RAGCoordinator | None = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.file_store = file_store or FileStore()
@@ -104,7 +104,7 @@ class ProjectManager:
         self,
         include_archived: bool = False,
         only_starred: bool = False,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         offset: int = 0,
     ) -> list[ProjectListItem]:
         rows = await asyncio.to_thread(
@@ -228,9 +228,9 @@ class ProjectManager:
     async def list_artifacts(
         self,
         project_id: str,
-        artifact_type: Optional[str] = None,
-        artifact_kind: Optional[str] = None,
-        search: Optional[str] = None,
+        artifact_type: str | None = None,
+        artifact_kind: str | None = None,
+        search: str | None = None,
     ) -> list[ArtifactRef]:
         await self.get(project_id)
         rows = await asyncio.to_thread(
@@ -245,7 +245,7 @@ class ProjectManager:
     async def export_artifacts(
         self,
         project_id: str,
-        artifact_ids: Optional[list[str]] = None,
+        artifact_ids: list[str] | None = None,
     ) -> bytes:
         await self.get(project_id)
         if artifact_ids:
@@ -335,7 +335,7 @@ class ProjectManager:
     async def duplicate_project(
         self,
         project_id: str,
-        name: Optional[str] = None,
+        name: str | None = None,
         copy_chats: bool = False,
     ) -> Project:
         source = await self.get(project_id)
@@ -376,7 +376,7 @@ class ProjectManager:
                 "merge_mode": bindings["merge_mode"],
             })
         folders = await asyncio.to_thread(self.store.list_folders, source_id)
-        folder_id_map: dict[Optional[str], Optional[str]] = {}
+        folder_id_map: dict[str | None, str | None] = {}
         for f in folders:
             new_folder = await asyncio.to_thread(self.store.create_folder, {
                 "project_id": dest_id,
