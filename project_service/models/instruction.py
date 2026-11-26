@@ -1,4 +1,3 @@
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -8,7 +7,7 @@ from project_service import config
 class InstructionContent(BaseModel):
     project_id: str
     content: str = ""
-    updated_at: Optional[str] = None
+    updated_at: str | None = None
 
     @classmethod
     def from_row(cls, row: dict) -> "InstructionContent":
@@ -27,7 +26,7 @@ class InstructionSnapshot(BaseModel):
     id: str
     project_id: str
     content: str
-    label: Optional[str] = None
+    label: str | None = None
     created_at: str
 
     @classmethod

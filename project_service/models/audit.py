@@ -1,4 +1,3 @@
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -6,10 +5,10 @@ from pydantic import BaseModel
 class AuditLogEntry(BaseModel):
     id: str
     project_id: str
-    chat_id: Optional[str] = None
+    chat_id: str | None = None
     action: str
-    agent_id: Optional[str] = None
-    details: Optional[str] = None
+    agent_id: str | None = None
+    details: str | None = None
     created_at: str
 
     @classmethod

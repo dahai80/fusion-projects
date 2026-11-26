@@ -4,24 +4,21 @@ import logging
 import os
 import signal
 import uuid
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
 
 from pydantic import ValidationError
 
 from project_service import config, metrics
-
-# M11: per-request correlation id. handlers/log lines can attribute themselves
-# to the inbound request without threading it through every signature.
-request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 from project_service.engine.agent_binder import AgentBinder, AgentBinderError
 from project_service.engine.chat_manager import ChatError, ChatManager, ChatNotFound
 from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.engine.instruction_engine import InstructionEngine, SnapshotNotFound
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
-    KnowledgeFileNotFound,
     KnowledgeError,
+    KnowledgeFileNotFound,
     KnowledgeManager,
     KnowledgeQuotaExceeded,
 )
@@ -29,21 +26,26 @@ from project_service.engine.project_manager import (
     ArtifactAlreadyMigrated,
     ArtifactNotFound,
     ProjectError,
+    ProjectManager,
     ProjectNotArchived,
     ProjectNotFound,
-    ProjectManager,
 )
 from project_service.engine.rag_coordinator import RAGCoordinator, RAGError
 from project_service.models.agent_binding import PromptMergeMode
+from project_service.models.audit import AuditLogEntry
 from project_service.models.chat import ChatCreate, ChatUpdate, MessageCreate
 from project_service.models.instruction import InstructionSave
 from project_service.models.knowledge import FolderCreate, FolderUpdate
 from project_service.models.project import ProjectCreate, ProjectUpdate
-from project_service.models.audit import AuditLogEntry
-from project_service.store.project_store import ProjectStore, FolderError
+from project_service.store.project_store import FolderError, ProjectStore
+
+# M11: per-request correlation id. handlers/log lines can attribute themselves
+# to the inbound request without threading it through every signature.
+request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
 try:
-    from importlib.metadata import version as _pkg_version, PackageNotFoundError
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
     try:
         _VERSION = _pkg_version("fusion-project-svc")
     except PackageNotFoundError:
@@ -59,13 +61,13 @@ class ProjectRPCServer:
 
     def __init__(
         self,
-        project_manager: Optional[ProjectManager] = None,
-        instruction_engine: Optional[InstructionEngine] = None,
-        chat_manager: Optional[ChatManager] = None,
-        knowledge_manager: Optional[KnowledgeManager] = None,
-        agent_binder: Optional[AgentBinder] = None,
-        rag_coordinator: Optional[RAGCoordinator] = None,
-        upstream: Optional[GatewayClient] = None,
+        project_manager: ProjectManager | None = None,
+        instruction_engine: InstructionEngine | None = None,
+        chat_manager: ChatManager | None = None,
+        knowledge_manager: KnowledgeManager | None = None,
+        agent_binder: AgentBinder | None = None,
+        rag_coordinator: RAGCoordinator | None = None,
+        upstream: GatewayClient | None = None,
     ) -> None:
         upstream = upstream or GatewayClient()
         self.gateway_client = upstream
@@ -360,7 +362,7 @@ class ProjectRPCServer:
         msg = await self.chat_manager.add_message(params["chat_id"], payload)
         return msg.model_dump()
 
-    async def _msg_stream(self, params: Any, emit: Optional[Callable[[dict], Awaitable[None]]] = None) -> dict:
+    async def _msg_stream(self, params: Any, emit: Callable[[dict], Awaitable[None]] | None = None) -> dict:
         chat_id = params["chat_id"]
         content = params["content"]
         chat = await self.chat_manager.get_chat(chat_id)
@@ -779,7 +781,7 @@ class ProjectRPCServer:
             )
         return {"zip_base64": base64.b64encode(data).decode("ascii"), "size": len(data)}
 
-    async def _export_stream_project(self, params: Any, emit: Optional[Callable[[dict], Awaitable[None]]] = None) -> dict:
+    async def _export_stream_project(self, params: Any, emit: Callable[[dict], Awaitable[None]] | None = None) -> dict:
         import base64
         project_id = params["project_id"]
         want_stream = bool(params.get("stream", False)) and emit is not None
@@ -819,7 +821,7 @@ class ProjectRPCServer:
 
     # ── Dispatch ──
 
-    async def dispatch(self, method: str, params: Any, emit: Optional[Callable[[dict], Awaitable[None]]] = None) -> Any:
+    async def dispatch(self, method: str, params: Any, emit: Callable[[dict], Awaitable[None]] | None = None) -> Any:
         handler = self._handlers.get(method)
         if handler is None:
             raise ValueError("unknown method: " + method)
@@ -827,7 +829,7 @@ class ProjectRPCServer:
             return await handler(params, emit=emit)
         return await handler(params)
 
-    async def handle_request(self, raw: bytes, writer: Optional[asyncio.StreamWriter] = None) -> bytes:
+    async def handle_request(self, raw: bytes, writer: asyncio.StreamWriter | None = None) -> bytes:
         try:
             req = json.loads(raw.decode("utf-8"))
         except Exception as e:
@@ -846,7 +848,7 @@ class ProjectRPCServer:
             metrics.record_uds_request(str(method), -32601)
             request_id_var.reset(token)
             return _error(req_id, -32601, "method not found: " + str(method))
-        emit: Optional[Callable[[dict], Awaitable[None]]] = None
+        emit: Callable[[dict], Awaitable[None]] | None = None
         if (
             method in ("project.chat.message.stream", "project.export.stream")
             and isinstance(params, dict)
@@ -938,7 +940,7 @@ class ProjectRPCServer:
             while True:
                 try:
                     line = await asyncio.wait_for(reader.readline(), timeout=read_timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("uds readline timeout peer=%s after %ss", peer, read_timeout)
                     break
                 if not line:
@@ -959,7 +961,7 @@ class ProjectRPCServer:
             except Exception:
                 pass
 
-    async def serve(self, sock_path: Optional[str] = None) -> None:
+    async def serve(self, sock_path: str | None = None) -> None:
         sock_path = sock_path or config.SOCKET_PATH
         # refuse to bind over a symlink: an attacker could point an existing
         # socket path at a sensitive file and we'd truncate/replace it.
@@ -1051,7 +1053,7 @@ def _error(req_id: Any, code: int, message: str) -> bytes:
     ).encode("utf-8")
 
 
-async def run_daemon(sock_path: Optional[str] = None) -> None:
+async def run_daemon(sock_path: str | None = None) -> None:
     config.ensure_dirs()
     server = ProjectRPCServer()
     await server.serve(sock_path)

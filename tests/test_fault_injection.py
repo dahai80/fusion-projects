@@ -68,11 +68,11 @@ async def test_rag_down_mid_request_degrades_gracefully(tmp_path):
     # GatewayClient must raise GatewayError (no hang, no silent None), and the
     # UDS dispatch must map it to a JSON-RPC error without crashing the daemon.
     from project_service import config
-    from project_service.store.project_store import ProjectStore
+    from project_service.daemon_server import ProjectRPCServer
+    from project_service.engine.gateway_client import GatewayClient, GatewayError
     from project_service.engine.project_manager import ProjectManager
     from project_service.engine.rag_coordinator import RAGCoordinator
-    from project_service.engine.gateway_client import GatewayClient, GatewayError
-    from project_service.daemon_server import ProjectRPCServer
+    from project_service.store.project_store import ProjectStore
 
     config.RAG_BASE_URL = os.environ.get("FUSION_RAG_URL", "http://127.0.0.1:11436")
     config.RAG_EMBEDDING_MODEL = "BAAI/bge-m3"

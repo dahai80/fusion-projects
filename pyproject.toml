@@ -37,3 +37,10 @@ testpaths = ["tests"]
 markers = [
     "integration: requires live upstreams (fusion-gateway 11432 / fusion-mlx 11434 / fusion-rag 11436)",
 ]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["B008", "E501"]

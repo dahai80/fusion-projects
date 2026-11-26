@@ -2,14 +2,12 @@ import hmac
 import logging
 import time
 from collections import defaultdict
-from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from project_service import config
-from project_service import metrics
+from project_service import config, metrics
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +145,7 @@ class _RateLimiter:
             logger.warning("rate limiter ip cap reached max_ips=%d evicted to %d", self.max_ips, len(self._hits))
 
 
-_rate_limiter: Optional[_RateLimiter] = None
+_rate_limiter: _RateLimiter | None = None
 
 
 def _get_rate_limiter() -> _RateLimiter:

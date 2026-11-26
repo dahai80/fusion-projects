@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from project_service import config
 
@@ -10,13 +10,13 @@ logger = logging.getLogger(__name__)
 
 class RPCError(Exception):
     def __init__(self, code: int, message: str) -> None:
-        super().__init__("[{}] {}".format(code, message))
+        super().__init__(f"[{code}] {message}")
         self.code = code
         self.message = message
 
 
 class ProjectClient:
-    def __init__(self, sock_path: Optional[str] = None) -> None:
+    def __init__(self, sock_path: str | None = None) -> None:
         self.sock_path = sock_path or config.SOCKET_PATH
 
     async def call(

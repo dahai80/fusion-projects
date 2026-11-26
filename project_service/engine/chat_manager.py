@@ -4,10 +4,9 @@ import logging
 import shutil
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from project_service import config
-from project_service.engine.knowledge_manager import KnowledgeError, _sanitize_name, _validate_source
+from project_service.engine.knowledge_manager import _sanitize_name, _validate_source
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
 from project_service.models.chat import (
     Chat,
@@ -35,9 +34,9 @@ class ChatNotFound(ChatError):
 class ChatManager:
     def __init__(
         self,
-        store: Optional[ProjectStore] = None,
-        project_manager: Optional[ProjectManager] = None,
-        file_store: Optional[FileStore] = None,
+        store: ProjectStore | None = None,
+        project_manager: ProjectManager | None = None,
+        file_store: FileStore | None = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.project_manager = project_manager or ProjectManager()
@@ -48,7 +47,7 @@ class ChatManager:
         if not row:
             raise ProjectNotFound(project_id)
 
-    async def _assert_chat_in_project(self, chat_id: str, project_id: Optional[str]) -> Chat:
+    async def _assert_chat_in_project(self, chat_id: str, project_id: str | None) -> Chat:
         chat = await self.get_chat(chat_id)
         if project_id is not None and chat.project_id is not None and chat.project_id != project_id:
             logger.warning("chat ownership mismatch chat=%s chat_project=%s path_project=%s", chat_id, chat.project_id, project_id)
@@ -63,7 +62,7 @@ class ChatManager:
         logger.info("chat created id=%s project=%s", row["id"], project_id)
         return Chat.from_row(row)
 
-    async def get_chat(self, chat_id: str, project_id: Optional[str] = None) -> Chat:
+    async def get_chat(self, chat_id: str, project_id: str | None = None) -> Chat:
         row = await asyncio.to_thread(self.store.get_chat, chat_id)
         if not row:
             raise ChatNotFound(chat_id)
@@ -82,7 +81,7 @@ class ChatManager:
         rows = await asyncio.to_thread(self.store.list_chats, project_id, only_starred)
         return [ChatListItem.from_row(r) for r in rows]
 
-    async def update_chat(self, chat_id: str, fields: dict, project_id: Optional[str] = None) -> Chat:
+    async def update_chat(self, chat_id: str, fields: dict, project_id: str | None = None) -> Chat:
         await self._assert_chat_in_project(chat_id, project_id)
         row = await asyncio.to_thread(self.store.update_chat, chat_id, fields)
         if not row:
@@ -90,10 +89,10 @@ class ChatManager:
         logger.info("chat updated id=%s fields=%s", chat_id, list(fields.keys()))
         return Chat.from_row(row)
 
-    async def star_chat(self, chat_id: str, starred: bool = True, project_id: Optional[str] = None) -> Chat:
+    async def star_chat(self, chat_id: str, starred: bool = True, project_id: str | None = None) -> Chat:
         return await self.update_chat(chat_id, {"is_starred": starred}, project_id=project_id)
 
-    async def delete_chat(self, chat_id: str, project_id: Optional[str] = None) -> None:
+    async def delete_chat(self, chat_id: str, project_id: str | None = None) -> None:
         chat = await self._assert_chat_in_project(chat_id, project_id)
         if not await asyncio.to_thread(self.store.delete_chat, chat_id):
             raise ChatNotFound(chat_id)
@@ -107,7 +106,7 @@ class ChatManager:
                 logger.warning("chat attachments dir cleanup failed id=%s dir=%s err=%s", chat_id, attach_dir, e)
         logger.info("chat deleted id=%s", chat_id)
 
-    async def move_chat(self, chat_id: str, target_project_id: str, project_id: Optional[str] = None) -> Chat:
+    async def move_chat(self, chat_id: str, target_project_id: str, project_id: str | None = None) -> Chat:
         await self._assert_chat_in_project(chat_id, project_id)
         await self._ensure_project(target_project_id)
         chat = await self.get_chat(chat_id)
@@ -117,7 +116,7 @@ class ChatManager:
         logger.info("chat moved id=%s from=%s to=%s", chat_id, chat.project_id, target_project_id)
         return Chat.from_row(row)
 
-    async def detach_chat(self, chat_id: str, project_id: Optional[str] = None) -> Chat:
+    async def detach_chat(self, chat_id: str, project_id: str | None = None) -> Chat:
         chat = await self._assert_chat_in_project(chat_id, project_id)
         row = await asyncio.to_thread(self.store.detach_chat, chat_id)
         if not row:
@@ -128,8 +127,8 @@ class ChatManager:
     async def fork_chat(
         self,
         chat_id: str,
-        label: Optional[str] = None,
-        project_id: Optional[str] = None,
+        label: str | None = None,
+        project_id: str | None = None,
     ) -> Chat:
         source = await self._assert_chat_in_project(chat_id, project_id)
         snapshot = await self.create_snapshot(chat_id)
@@ -166,9 +165,9 @@ class ChatManager:
     async def create_snapshot(
         self,
         chat_id: str,
-        label: Optional[str] = None,
-        instruction_snapshot_id: Optional[str] = None,
-        project_id: Optional[str] = None,
+        label: str | None = None,
+        instruction_snapshot_id: str | None = None,
+        project_id: str | None = None,
     ) -> ChatSnapshot:
         chat = await self._assert_chat_in_project(chat_id, project_id)
         msg_count = await asyncio.to_thread(self.store.count_messages, chat_id)
@@ -185,12 +184,12 @@ class ChatManager:
         logger.info("chat snapshot created id=%s chat=%s msgs=%d", row["id"], chat_id, msg_count)
         return ChatSnapshot.from_row(row)
 
-    async def list_snapshots(self, chat_id: str, project_id: Optional[str] = None) -> list[ChatSnapshot]:
+    async def list_snapshots(self, chat_id: str, project_id: str | None = None) -> list[ChatSnapshot]:
         await self._assert_chat_in_project(chat_id, project_id)
         rows = await asyncio.to_thread(self.store.list_chat_snapshots, chat_id)
         return [ChatSnapshot.from_row(r) for r in rows]
 
-    async def restore_snapshot(self, snapshot_id: str, project_id: Optional[str] = None) -> Chat:
+    async def restore_snapshot(self, snapshot_id: str, project_id: str | None = None) -> Chat:
         snap_row = await asyncio.to_thread(self.store.get_chat_snapshot, snapshot_id)
         if not snap_row:
             raise ChatNotFound(f"snapshot {snapshot_id}")
@@ -201,12 +200,12 @@ class ChatManager:
             restored_rows = json.loads(messages_json)
         except (ValueError, TypeError) as e:
             logger.error("snapshot %s messages decode failed: %s", snapshot_id, e)
-            raise ChatError(f"snapshot {snapshot_id} has corrupt messages payload")
+            raise ChatError(f"snapshot {snapshot_id} has corrupt messages payload") from e
         await asyncio.to_thread(self.store.replace_chat_messages, chat_id, restored_rows)
         logger.info("restored snapshot %s for chat %s msgs=%d", snapshot_id, chat_id, len(restored_rows))
         return await self.get_chat(chat_id)
 
-    async def delete_snapshot(self, snapshot_id: str, project_id: Optional[str] = None) -> None:
+    async def delete_snapshot(self, snapshot_id: str, project_id: str | None = None) -> None:
         snap_row = await asyncio.to_thread(self.store.get_chat_snapshot, snapshot_id)
         if not snap_row:
             raise ChatNotFound(f"snapshot {snapshot_id}")
@@ -215,7 +214,7 @@ class ChatManager:
             raise ChatNotFound(f"snapshot {snapshot_id}")
         logger.info("chat snapshot deleted id=%s", snapshot_id)
 
-    async def add_message(self, chat_id: str, payload: MessageCreate, project_id: Optional[str] = None) -> Message:
+    async def add_message(self, chat_id: str, payload: MessageCreate, project_id: str | None = None) -> Message:
         await self._assert_chat_in_project(chat_id, project_id)
         data = payload.model_dump()
         data["chat_id"] = chat_id
@@ -229,13 +228,13 @@ class ChatManager:
         chat_id: str,
         limit: int = 100,
         offset: int = 0,
-        project_id: Optional[str] = None,
+        project_id: str | None = None,
     ) -> list[Message]:
         await self._assert_chat_in_project(chat_id, project_id)
         rows = await asyncio.to_thread(self.store.list_messages, chat_id, limit, offset)
         return [Message.from_row(r) for r in rows]
 
-    async def delete_message(self, message_id: str, project_id: Optional[str] = None) -> None:
+    async def delete_message(self, message_id: str, project_id: str | None = None) -> None:
         msg = await asyncio.to_thread(self.store.get_message, message_id)
         if not msg:
             raise ChatNotFound(f"message {message_id}")
@@ -250,8 +249,8 @@ class ChatManager:
         file_path: str,
         original_name: str,
         file_size: int = 0,
-        mime_type: Optional[str] = None,
-        project_id: Optional[str] = None,
+        mime_type: str | None = None,
+        project_id: str | None = None,
     ) -> TempAttachment:
         chat = await self._assert_chat_in_project(chat_id, project_id)
         src = _validate_source(file_path)
@@ -277,12 +276,12 @@ class ChatManager:
         logger.info("temp attachment added id=%s chat=%s name=%s", row["id"], chat_id, safe_name)
         return TempAttachment.from_row(row)
 
-    async def list_temp_attachments(self, chat_id: str, project_id: Optional[str] = None) -> list[TempAttachment]:
+    async def list_temp_attachments(self, chat_id: str, project_id: str | None = None) -> list[TempAttachment]:
         await self._assert_chat_in_project(chat_id, project_id)
         rows = await asyncio.to_thread(self.store.list_temp_attachments, chat_id)
         return [TempAttachment.from_row(r) for r in rows]
 
-    async def delete_temp_attachment(self, attachment_id: str, project_id: Optional[str] = None) -> bool:
+    async def delete_temp_attachment(self, attachment_id: str, project_id: str | None = None) -> bool:
         existing = await asyncio.to_thread(self.store.get_temp_attachment, attachment_id)
         if not existing:
             raise ChatNotFound(f"temp attachment {attachment_id}")

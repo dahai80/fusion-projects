@@ -1,9 +1,9 @@
 import pytest
 
-from project_service.store.file_store import FileStore
-from project_service.store.project_store import ProjectStore
 from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.project_manager import ProjectManager
+from project_service.store.file_store import FileStore
+from project_service.store.project_store import ProjectStore
 
 
 @pytest.fixture

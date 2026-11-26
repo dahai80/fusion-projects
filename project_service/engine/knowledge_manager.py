@@ -4,7 +4,6 @@ import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from project_service import config
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
@@ -50,7 +49,7 @@ def _is_under(path: Path, base: str) -> bool:
         return False
 
 
-def _validate_source(source_path: str, project_id: Optional[str] = None) -> Path:
+def _validate_source(source_path: str, project_id: str | None = None) -> Path:
     # allowlist model: a source file may only be read from the project's own
     # storage dir, an explicitly configured import root, or the system temp dir
     # (legitimate staging area for browser/CLI uploads). a denylist alone always
@@ -119,10 +118,10 @@ def _atomic_copy(src: Path, dest: Path) -> None:
 class KnowledgeManager:
     def __init__(
         self,
-        store: Optional[ProjectStore] = None,
-        project_manager: Optional[ProjectManager] = None,
-        file_store: Optional[FileStore] = None,
-        rag_coordinator: Optional[RAGCoordinator] = None,
+        store: ProjectStore | None = None,
+        project_manager: ProjectManager | None = None,
+        file_store: FileStore | None = None,
+        rag_coordinator: RAGCoordinator | None = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.project_manager = project_manager or ProjectManager()
@@ -155,7 +154,7 @@ class KnowledgeManager:
     async def list_folders(
         self,
         project_id: str,
-        parent_id: Optional[str] = None,
+        parent_id: str | None = None,
     ) -> list[KnowledgeFolder]:
         await self._ensure_project(project_id)
         rows = await asyncio.to_thread(self.store.list_folders, project_id, parent_id)
@@ -188,12 +187,12 @@ class KnowledgeManager:
         self,
         project_id: str,
         *,
-        folder_id: Optional[str] = None,
+        folder_id: str | None = None,
         name: str,
         original_name: str,
         file_path: str,
         file_size: int = 0,
-        mime_type: Optional[str] = None,
+        mime_type: str | None = None,
     ) -> KnowledgeFile:
         await self._ensure_project(project_id)
         data = {
@@ -218,7 +217,7 @@ class KnowledgeManager:
     async def list_files(
         self,
         project_id: str,
-        folder_id: Optional[str] = None,
+        folder_id: str | None = None,
     ) -> list[KnowledgeFile]:
         await self._ensure_project(project_id)
         rows = await asyncio.to_thread(self.store.list_knowledge_files, project_id, folder_id)
@@ -228,7 +227,7 @@ class KnowledgeManager:
         self,
         file_id: str,
         index_status: str,
-        rag_doc_id: Optional[str] = None,
+        rag_doc_id: str | None = None,
     ) -> KnowledgeFile:
         fields: dict = {"index_status": index_status}
         if rag_doc_id is not None:
@@ -271,8 +270,8 @@ class KnowledgeManager:
         project_id: str,
         source_path: str,
         original_name: str,
-        folder_id: Optional[str] = None,
-        mime_type: Optional[str] = None,
+        folder_id: str | None = None,
+        mime_type: str | None = None,
     ) -> KnowledgeFile:
         await self._ensure_project(project_id)
         src = _validate_source(source_path, project_id=project_id)
@@ -368,7 +367,7 @@ class KnowledgeManager:
         logger.info("file renamed id=%s name=%s", file_id, name)
         return KnowledgeFile.from_row(row)
 
-    async def move_file(self, file_id: str, folder_id: Optional[str]) -> KnowledgeFile:
+    async def move_file(self, file_id: str, folder_id: str | None) -> KnowledgeFile:
         row = await asyncio.to_thread(self.store.update_knowledge_file, file_id, {"folder_id": folder_id})
         if not row:
             raise KnowledgeFileNotFound(file_id)

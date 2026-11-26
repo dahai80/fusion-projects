@@ -1,4 +1,4 @@
-from project_service.store.project_store import ProjectStore, SCHEMA_VERSION
+from project_service.store.project_store import SCHEMA_VERSION, ProjectStore
 
 
 def test_create_and_get(store: ProjectStore):

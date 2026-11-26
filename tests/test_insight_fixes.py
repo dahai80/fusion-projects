@@ -5,7 +5,7 @@ import pytest
 from project_service import config, metrics
 from project_service.engine.knowledge_manager import KnowledgeManager
 from project_service.engine.rag_coordinator import RAGCoordinator
-from project_service.store.project_store import ProjectStore, SCHEMA_VERSION
+from project_service.store.project_store import SCHEMA_VERSION, ProjectStore
 
 
 def test_schema_version_is_4():
@@ -167,6 +167,7 @@ def test_identity_verify_negative_cache(tmp_path, monkeypatch):
     # M14: a failed verify is cached for the TTL so repeat bad-token requests
     # don't each block on a sync HTTP roundtrip.
     import httpx
+
     from project_service.engine.gateway_client import GatewayClient, GatewayError
     metrics.reset()
     monkeypatch.setattr(config, "IDENTITY_SERVICE_TOKEN", "svc-tok")
@@ -210,6 +211,7 @@ async def test_identity_verify_async_negative_cache(tmp_path, monkeypatch):
     # must mirror the sync negative-cache behavior so a flood of bad-token
     # requests doesn't each round-trip to fusion-identity.
     import httpx
+
     from project_service.engine.gateway_client import GatewayClient, GatewayError
     metrics.reset()
     monkeypatch.setattr(config, "IDENTITY_SERVICE_TOKEN", "svc-tok")

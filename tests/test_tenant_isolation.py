@@ -3,7 +3,6 @@ import logging
 import httpx
 import pytest
 
-from project_service import config
 from project_service.store.project_store import ProjectStore
 
 logger = logging.getLogger(__name__)
@@ -113,6 +112,7 @@ def rest_app(tmp_path, monkeypatch):
     monkeypatch.setenv("FUSION_IDENTITY_SERVICE_TOKEN", "svc-secret")
     monkeypatch.setenv("FUSION_PROJECT_HOME", str(tmp_path / "fp"))
     import importlib
+
     import project_service.config as cfg_mod
     importlib.reload(cfg_mod)
     import project_service.engine.gateway_client as gw_mod
@@ -173,6 +173,7 @@ def test_rest_no_identity_token_keeps_auth_middleware(tmp_path, monkeypatch):
     monkeypatch.delenv("FUSION_IDENTITY_SERVICE_TOKEN", raising=False)
     monkeypatch.setenv("FUSION_PROJECT_HOME", str(tmp_path / "fp2"))
     import importlib
+
     import project_service.config as cfg_mod
     importlib.reload(cfg_mod)
     import project_service.engine.gateway_client as gw_mod

@@ -1,5 +1,4 @@
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel
 
@@ -11,8 +10,8 @@ class PromptMergeMode(str, Enum):
 
 class AgentBinding(BaseModel):
     project_id: str
-    chat_id: Optional[str] = None
-    agent_id: Optional[str] = None
+    chat_id: str | None = None
+    agent_id: str | None = None
     merge_mode: PromptMergeMode = PromptMergeMode.AGENT_FIRST
 
     @classmethod
@@ -28,15 +27,15 @@ class AgentBinding(BaseModel):
 class AgentPreview(BaseModel):
     agent_id: str
     name: str
-    description: Optional[str] = None
-    avatar: Optional[str] = None
-    tools: Optional[list[str]] = None
+    description: str | None = None
+    avatar: str | None = None
+    tools: list[str] | None = None
     rag_enabled: bool = True
-    permissions: Optional[list[str]] = None
+    permissions: list[str] | None = None
 
 
 class AgentMeta(BaseModel):
     agent_id: str
     name: str
-    description: Optional[str] = None
-    avatar: Optional[str] = None
+    description: str | None = None
+    avatar: str | None = None

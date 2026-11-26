@@ -1,27 +1,26 @@
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
 
 class ChatCreate(BaseModel):
-    title: Optional[str] = None
-    agent_id: Optional[str] = None
+    title: str | None = None
+    agent_id: str | None = None
 
 
 class ChatUpdate(BaseModel):
-    title: Optional[str] = Field(None, min_length=1, max_length=200)
-    is_starred: Optional[bool] = None
-    agent_id: Optional[str] = None
+    title: str | None = Field(None, min_length=1, max_length=200)
+    is_starred: bool | None = None
+    agent_id: str | None = None
 
 
 class Chat(BaseModel):
     id: str
-    project_id: Optional[str] = None
-    title: Optional[str] = None
+    project_id: str | None = None
+    title: str | None = None
     is_starred: bool = False
-    agent_id: Optional[str] = None
-    fork_from_chat_id: Optional[str] = None
-    fork_from_snapshot_id: Optional[str] = None
+    agent_id: str | None = None
+    fork_from_chat_id: str | None = None
+    fork_from_snapshot_id: str | None = None
     created_at: str
     updated_at: str
 
@@ -42,10 +41,10 @@ class Chat(BaseModel):
 
 class ChatListItem(BaseModel):
     id: str
-    project_id: Optional[str] = None
-    title: Optional[str] = None
+    project_id: str | None = None
+    title: str | None = None
     is_starred: bool = False
-    agent_id: Optional[str] = None
+    agent_id: str | None = None
     updated_at: str
 
     @classmethod
@@ -63,11 +62,11 @@ class ChatListItem(BaseModel):
 class ChatSnapshot(BaseModel):
     id: str
     chat_id: str
-    title: Optional[str] = None
+    title: str | None = None
     messages: str = "[]"
-    instruction_snapshot_id: Optional[str] = None
+    instruction_snapshot_id: str | None = None
     message_count: int = 0
-    agent_id: Optional[str] = None
+    agent_id: str | None = None
     created_at: str
 
     @classmethod
@@ -85,7 +84,7 @@ class ChatSnapshot(BaseModel):
 
 
 class ChatForkRequest(BaseModel):
-    label: Optional[str] = None
+    label: str | None = None
 
 
 class ChatMoveRequest(BaseModel):
@@ -95,12 +94,12 @@ class ChatMoveRequest(BaseModel):
 class MessageCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=200000)
     role: str = "user"
-    rag_mode: Optional[str] = None
-    rag_scope: Optional[list[str]] = None
-    model: Optional[str] = None
-    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
-    max_tokens: Optional[int] = Field(None, ge=1, le=32768)
-    stream: Optional[bool] = None
+    rag_mode: str | None = None
+    rag_scope: list[str] | None = None
+    model: str | None = None
+    temperature: float | None = Field(None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, ge=1, le=32768)
+    stream: bool | None = None
 
 
 class TempAttachment(BaseModel):
@@ -109,7 +108,7 @@ class TempAttachment(BaseModel):
     file_path: str
     original_name: str
     file_size: int = 0
-    mime_type: Optional[str] = None
+    mime_type: str | None = None
     created_at: str
 
     @classmethod

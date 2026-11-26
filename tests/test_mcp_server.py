@@ -12,10 +12,9 @@ from project_service.engine.instruction_engine import InstructionEngine
 from project_service.engine.knowledge_manager import KnowledgeManager
 from project_service.engine.project_manager import ProjectManager
 from project_service.mcp_server import MCPServer
+from project_service.models.project import ProjectCreate
 from project_service.store.file_store import FileStore
 from project_service.store.project_store import ProjectStore
-from project_service.models.project import ProjectCreate
-
 
 # ── fixtures ──
 
@@ -131,6 +130,7 @@ def test_mcp_max_line_bytes_config_exists():
 
 def test_mcp_stdio_loop_has_cap():
     import inspect
+
     from project_service.mcp_server import run_mcp_stdio
     src = inspect.getsource(run_mcp_stdio)
     assert "MCP_MAX_LINE_BYTES" in src, "R7: stdio loop missing byte cap"

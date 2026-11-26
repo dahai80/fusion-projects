@@ -1,5 +1,5 @@
-import pytest
 import httpx
+import pytest
 
 from project_service.api.rest_server import create_app
 from project_service.engine.instruction_engine import InstructionEngine
@@ -54,6 +54,7 @@ async def test_ready_returns_200_when_upstreams_up(client, monkeypatch):
 
 async def test_metrics_returns_counters_and_health(client, monkeypatch):
     from unittest.mock import AsyncMock
+
     from project_service import metrics as metrics_mod
     metrics_mod.reset()
     app = client._transport.app
@@ -76,6 +77,7 @@ async def test_metrics_returns_counters_and_health(client, monkeypatch):
 
 async def test_metrics_records_requests(client, monkeypatch):
     from unittest.mock import AsyncMock
+
     from project_service import metrics as metrics_mod
     metrics_mod.reset()
     app = client._transport.app

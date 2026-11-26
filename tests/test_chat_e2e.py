@@ -1,5 +1,4 @@
 import os
-import tempfile
 
 import pytest
 
@@ -61,16 +60,16 @@ async def e2e_server(tmp_path):
     config.RAG_BASE_URL = "http://127.0.0.1:11436"
     config.AGENT_STUDIO_URL = "http://127.0.0.1:11442"
 
-    from project_service.store.project_store import ProjectStore
-    from project_service.store.file_store import FileStore
     from project_service.daemon_server import ProjectRPCServer
-    from project_service.engine.project_manager import ProjectManager
-    from project_service.engine.instruction_engine import InstructionEngine
-    from project_service.engine.chat_manager import ChatManager
-    from project_service.engine.knowledge_manager import KnowledgeManager
     from project_service.engine.agent_binder import AgentBinder
-    from project_service.engine.rag_coordinator import RAGCoordinator
+    from project_service.engine.chat_manager import ChatManager
     from project_service.engine.gateway_client import GatewayClient
+    from project_service.engine.instruction_engine import InstructionEngine
+    from project_service.engine.knowledge_manager import KnowledgeManager
+    from project_service.engine.project_manager import ProjectManager
+    from project_service.engine.rag_coordinator import RAGCoordinator
+    from project_service.store.file_store import FileStore
+    from project_service.store.project_store import ProjectStore
 
     store = ProjectStore(db_path=os.path.join(str(tmp_path), "projects.db"))
     fs = FileStore(storage_dir=os.path.join(str(tmp_path), "storage"))

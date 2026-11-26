@@ -1,11 +1,13 @@
 import json
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from project_service import config
 from project_service.daemon_server import ProjectRPCServer
 from project_service.engine.agent_binder import AgentBinderError, AgentUnavailable
-from project_service.engine.chat_manager import ChatError, ChatNotFound
+from project_service.engine.chat_manager import ChatNotFound
+from project_service.engine.gateway_client import GatewayError
 from project_service.engine.knowledge_manager import (
     FolderNotFound,
     KnowledgeError,
@@ -14,7 +16,6 @@ from project_service.engine.knowledge_manager import (
 )
 from project_service.engine.project_manager import ProjectError, ProjectNotFound
 from project_service.engine.rag_coordinator import RAGError
-from project_service.engine.gateway_client import GatewayError
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +147,7 @@ _MCP_DOMAIN_CODES = {
 
 
 class MCPServer:
-    def __init__(self, rpc_server: Optional[ProjectRPCServer] = None) -> None:
+    def __init__(self, rpc_server: ProjectRPCServer | None = None) -> None:
         self.rpc = rpc_server or ProjectRPCServer()
         self._tool_handlers: dict[str, Callable[..., Awaitable[Any]]] = {
             "project_list": self._tool_project_list,

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from typing import Optional
 
 from project_service.engine.gateway_client import GatewayClient, GatewayError
 from project_service.engine.project_manager import ProjectManager, ProjectNotFound
@@ -26,9 +25,9 @@ class AgentUnavailable(AgentBinderError):
 class AgentBinder:
     def __init__(
         self,
-        store: Optional[ProjectStore] = None,
-        project_manager: Optional[ProjectManager] = None,
-        upstream: Optional[GatewayClient] = None,
+        store: ProjectStore | None = None,
+        project_manager: ProjectManager | None = None,
+        upstream: GatewayClient | None = None,
     ) -> None:
         self.store = store or ProjectStore()
         self.project_manager = project_manager or ProjectManager()
@@ -42,7 +41,7 @@ class AgentBinder:
         if not row:
             raise ProjectNotFound(project_id)
 
-    async def get_binding(self, project_id: str, chat_id: Optional[str] = None) -> AgentBinding:
+    async def get_binding(self, project_id: str, chat_id: str | None = None) -> AgentBinding:
         await self._ensure_project(project_id)
         if chat_id:
             row = await asyncio.to_thread(self.store.get_binding_by_chat, chat_id)
@@ -69,9 +68,9 @@ class AgentBinder:
     async def set_binding(
         self,
         project_id: str,
-        agent_id: Optional[str] = None,
-        merge_mode: Optional[PromptMergeMode] = None,
-        chat_id: Optional[str] = None,
+        agent_id: str | None = None,
+        merge_mode: PromptMergeMode | None = None,
+        chat_id: str | None = None,
     ) -> AgentBinding:
         await self._ensure_project(project_id)
         if agent_id:
@@ -103,7 +102,7 @@ class AgentBinder:
             logger.info("binding created project=%s chat=%s agent=%s", project_id, chat_id, agent_id)
         return await self.get_binding(project_id, chat_id=chat_id)
 
-    async def remove_binding(self, project_id: str, chat_id: Optional[str] = None) -> None:
+    async def remove_binding(self, project_id: str, chat_id: str | None = None) -> None:
         if chat_id:
             row = await asyncio.to_thread(self.store.get_binding_by_chat, chat_id)
         else:
@@ -130,7 +129,7 @@ class AgentBinder:
                 ))
         return metas
 
-    async def get_agent_preview(self, agent_id: str) -> Optional[AgentPreview]:
+    async def get_agent_preview(self, agent_id: str) -> AgentPreview | None:
         try:
             result = await self.upstream.agent_get(agent_id)
         except GatewayError as e:
@@ -152,8 +151,8 @@ class AgentBinder:
     async def build_system_prompt(
         self,
         project_id: str,
-        agent_prompt: Optional[str] = None,
-        chat_id: Optional[str] = None,
+        agent_prompt: str | None = None,
+        chat_id: str | None = None,
     ) -> str:
         binding = await self.get_binding(project_id, chat_id=chat_id)
         instruction_row = await asyncio.to_thread(self.store.get_instructions, project_id)
