@@ -351,6 +351,9 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.7.9 — ruff 残量清零（PR #43）
+`ruff check .` 现在 **All checks passed!**，零压制。v0.7.8 刻意保留的最后一条 UP042 已手动修复：`project_service/models/agent_binding.py` 的 `PromptMergeMode(str, Enum)` → `StrEnum`。等价性已验证 —— 所有消费方用 `.value` 做持久化/比较，全仓无 `str(member)` 插值，Pydantic v2 校验/序列化一致，字符串构造行为不变。206 离线测试全绿。
+
 ### v0.7.8 — ruff 门禁 + 清空 lint 存量（#40 #41，PR #42）
 新增 `[tool.ruff]`（line-length 120，E/F/W/I/UP/B；FastAPI `Depends()` 惯用法忽略 `B008`，`E501` 暂缓），清空 483 条违规存量：247 处 `Optional[X]` → `X | None`、import 排序、未用导入/变量、`typing.Dict/List/Tuple` → 内建泛型、`collections.abc` 导入、printf → f-string、`datetime.UTC` 别名、UTF-8 声明，以及 76 处 `raise ... from` 异常链（AST 辅助改写，保留各 handler 的异常绑定）。刻意保留 1 条 UP042（`PromptMergeMode` StrEnum 迁移会改变 `str()` 语义）。`ruff check .`：仅剩 1 条（UP042）；收集测试 214 前后一致；206 离线测试全绿。无预期行为变更。
 

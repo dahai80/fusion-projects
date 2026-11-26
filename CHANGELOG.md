@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.8
+version: 0.7.9
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:
@@ -19,6 +19,12 @@ source_of_truth:
 All notable changes to fusion-projects are documented here.
 
 ## Unreleased
+
+## 0.7.9 — 2026-11-26
+
+### Lint
+
+- `ruff check .` now fully green with zero suppressions (PR #43): the last UP042 residual fixed manually — `PromptMergeMode(str, Enum)` → `StrEnum` in `project_service/models/agent_binding.py`. Equivalence verified: all consumers use `.value` for persistence/equality, no `str(member)` interpolation anywhere, Pydantic v2 validation/serialization identical, plain-string construction unchanged. 206 tests green.
 
 ## 0.7.8 — 2026-11-26
 

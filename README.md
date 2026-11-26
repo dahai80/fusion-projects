@@ -606,6 +606,15 @@ this service:
 
 ## Changelog
 
+### v0.7.9 — ruff residual zero (PR #43)
+`ruff check .` now reports **All checks passed!** with zero suppressions. The
+one intentional v0.7.8 residual (UP042) was applied manually:
+`PromptMergeMode(str, Enum)` → `StrEnum` in `project_service/models/
+agent_binding.py`. Equivalence verified — all consumers use `.value` for
+persistence/equality, no `str(member)` interpolation exists, Pydantic v2
+validation/serialization identical, plain-string construction unchanged.
+206 offline tests green.
+
 ### v0.7.8 — ruff gate + lint stockpile cleared (#40 #41, PR #42)
 Adds `[tool.ruff]` (line-length 120, E/F/W/I/UP/B; `B008` ignored for the
 FastAPI `Depends()` idiom, `E501` deferred) and clears the 483-violation
