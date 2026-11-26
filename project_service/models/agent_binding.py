@@ -1,9 +1,9 @@
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel
 
 
-class PromptMergeMode(str, Enum):
+class PromptMergeMode(StrEnum):
     AGENT_FIRST = "AGENT_FIRST"
     PROJECT_ONLY = "PROJECT_ONLY"
 
