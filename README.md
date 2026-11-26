@@ -606,6 +606,17 @@ this service:
 
 ## Changelog
 
+### v0.7.8 — ruff gate + lint stockpile cleared (#40 #41, PR #42)
+Adds `[tool.ruff]` (line-length 120, E/F/W/I/UP/B; `B008` ignored for the
+FastAPI `Depends()` idiom, `E501` deferred) and clears the 483-violation
+stockpile: 247× `Optional[X]` → `X | None`, import sorting, unused
+imports/variables, `typing.Dict/List/Tuple` → builtins, `collections.abc`
+imports, printf → f-string, `datetime.UTC` alias, UTF-8 declarations, and 76
+`raise ... from` chains (AST-assisted, handler exception bindings preserved).
+1 residual UP042 (`PromptMergeMode` StrEnum migration) left intentionally —
+changes `str()` semantics. `ruff check .`: 1 (UP042 only); 214 tests collected
+before == after; 206 offline tests green. No behavior change intended.
+
 ### v0.7.7 — CI retrofit per fusion#2 checklist (#38, PR #39)
 CI-only release. `concurrency` (`cancel-in-progress: true`) grouped by ref on
 both `ci.yml` and `docs.yml` — superseded runs on the same ref cancel instead

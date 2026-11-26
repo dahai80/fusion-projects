@@ -351,6 +351,9 @@ initialize/tools-list/解析错误，UDS `ProjectRPCServer` 通过
 
 ## 变更日志
 
+### v0.7.8 — ruff 门禁 + 清空 lint 存量（#40 #41，PR #42）
+新增 `[tool.ruff]`（line-length 120，E/F/W/I/UP/B；FastAPI `Depends()` 惯用法忽略 `B008`，`E501` 暂缓），清空 483 条违规存量：247 处 `Optional[X]` → `X | None`、import 排序、未用导入/变量、`typing.Dict/List/Tuple` → 内建泛型、`collections.abc` 导入、printf → f-string、`datetime.UTC` 别名、UTF-8 声明，以及 76 处 `raise ... from` 异常链（AST 辅助改写，保留各 handler 的异常绑定）。刻意保留 1 条 UP042（`PromptMergeMode` StrEnum 迁移会改变 `str()` 语义）。`ruff check .`：仅剩 1 条（UP042）；收集测试 214 前后一致；206 离线测试全绿。无预期行为变更。
+
 ### v0.7.7 — CI 按 fusion#2 清单改造（#38，PR #39）
 纯 CI 版本。`ci.yml` 与 `docs.yml` 均加 `concurrency`（`cancel-in-progress: true`，按 ref 分组）—— 同 ref 的旧运行直接取消而不是排队。test 与 build 两个 job 加 pip 依赖缓存（`setup-python` `cache: pip`，按 `pyproject.toml` 清单哈希键控）。测试分片与 nightly 分层门禁经评估不采纳：离线全套约 50 秒跑完，per-PR CI 本身就是快门禁。before/after 运行时长记录在 PR #39。无代码改动。
 

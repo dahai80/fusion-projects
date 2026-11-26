@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.7
+version: 0.7.8
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:
@@ -19,6 +19,12 @@ source_of_truth:
 All notable changes to fusion-projects are documented here.
 
 ## Unreleased
+
+## 0.7.8 — 2026-11-26
+
+### Lint
+
+- Add `[tool.ruff]` gate (line-length 120, select E/F/W/I/UP/B; B008 ignored for the FastAPI `Depends()` idiom, E501 deferred) and `ruff check .` green — closes #40/#41 (PR #42). Stockpile cleared: `Optional[X]` to `X | None` (247), import sorting, unused imports, `typing.Dict/List/Tuple` to builtins, `collections.abc` imports, f-strings, `datetime.UTC`, 76 `raise ... from` chains (AST-assisted). 1 residual UP042 (StrEnum migration changes `str()` semantics) left intentionally. 214 tests collected before == after.
 
 ## 0.7.7 — 2026-11-16
 
